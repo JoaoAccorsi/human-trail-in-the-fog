@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is ignored by git.
+
+# Your public IP (https://checkip.amazonaws.com) followed by /32
+allowed_cidr = "203.0.113.10/32"
+
+region     = "us-east-1"
+edge_users = [4000, 4005]
+day        = 20
+
+# handover_policy = "area"   # baseline for comparison
+# hom_db          = 3
+# ttt_min         = 60

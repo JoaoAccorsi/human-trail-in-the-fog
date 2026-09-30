@@ -1,0 +1,36 @@
+# Runs the whole HTF in containers on one machine, with the same images used on AWS.
+# The 16 Fog nodes run in a single container (they still talk only over the network).
+#
+#   deploy/extract-users.sh 4005        # dataset rows of the simulated user (once)
+#   docker compose up --build
+#   open http://localhost:8501
+services:
+  tms:
+    build: cloud/tms
+    ports: ["8080:8080"]
+    volumes: ["./cloud/tms/data:/app/data"]
+
+  fog:
+    build: fog
+    environment:
+      HTF_FOG_HOST: fog
+      HTF_FOG_SEED: http://fog:9001
+      HTF_TMS_URL: http://tms:8080
+    depends_on: [tms]
+
+  cmp:
+    build: cloud/mobility-platform
+    environment:
+      HTF_TMS_URL: http://tms:8080
+    ports: ["8501:8501"]
+    depends_on: [tms]
+
+  edge:
+    build: edge
+    environment:
+      HTF_USER: "4005"
+      HTF_DAY: "20"
+      HTF_ENTRY_BROKER: tcp://fog:1901
+      HTF_START_DELAY_S: "20"
+      HTF_CONNECT_RETRY_S: "120"
+    depends_on: [fog]

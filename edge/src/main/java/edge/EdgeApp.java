@@ -63,14 +63,26 @@ public class EdgeApp {
         System.out.printf("[Edge] user %d, day %d -> pseudonym %s... (%d pings)%n",
                 Config.USER, Config.DAY, h.substring(0, 16), pings.size());
 
-        try {
-            current = connect(Config.ENTRY_BROKER, h);
-        } catch (MqttException e) {
-            System.out.printf("[Edge] could not connect to broker %s (%s).%n"
-                    + "       Is the Fog running? Use: cd fog && mvn -q compile exec:exec%n",
-                    Config.ENTRY_BROKER, e.getReasonCode());
-            System.exit(1);
-            return;
+        if (Config.START_DELAY_S > 0) {
+            System.out.printf("[Edge] waiting %d s before starting%n", Config.START_DELAY_S);
+            Thread.sleep(Config.START_DELAY_S * 1000L);
+        }
+        long deadline = System.currentTimeMillis() + Config.CONNECT_RETRY_S * 1000L;
+        while (current == null) {
+            try {
+                current = connect(Config.ENTRY_BROKER, h);
+            } catch (MqttException e) {
+                if (System.currentTimeMillis() < deadline) {
+                    System.out.printf("[Edge] broker %s not available yet, retrying...%n", Config.ENTRY_BROKER);
+                    Thread.sleep(5000);
+                    continue;
+                }
+                System.out.printf("[Edge] could not connect to broker %s (%s).%n"
+                        + "       Is the Fog running? Use: cd fog && mvn -q compile exec:exec%n",
+                        Config.ENTRY_BROKER, e.getReasonCode());
+                System.exit(1);
+                return;
+            }
         }
         System.out.printf("[Edge] connected to entry broker %s%n", Config.ENTRY_BROKER);
 

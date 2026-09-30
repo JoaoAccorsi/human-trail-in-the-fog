@@ -1,70 +1,202 @@
 # HTF — Human Trail in the Fog
 
-Rebuilding a person's digital trail through the Fog nodes of a smart city.
-The Edge layer is simulated with the **YJMob100K** dataset (dataset 2):
-anonymized trajectories on a grid of 200 × 200 cells of 500 m, in
-30-minute timeslots.
+Rebuilding a person's digital trail through the Fog nodes of a smart city, with stateful
+handover between Fog nodes, GS1 EPCIS 2.0 traceability events and a decentralized directory
+(Chord ring) that stores pseudonyms only.
 
 Undergraduate thesis (TCC) — Computer Science, UNISINOS (2026) · João Vítor Accorsi · Advisor: Dr. Rodrigo da Rosa Righi
 
-![Cloud Mobility Platform — trail of user 4005 on day 20](docs/img/mobility-platform.png)
-<sub>Cloud Mobility Platform, "User trail" query: user 4005 on day 20 (RSRP + Kalman + TTT handover policy). The user visits Fog 2 and Fog 3 with a single handover at 13:30; the expander at the bottom lists the GS1 EPCIS events (arriving/departing) received by the TMS.</sub>
+![HTF architecture](docs/img/architecture.png)
+<sub>Architecture of the prototype. Orange: control plane (handover and context migration between Fog
+nodes). Blue: data plane (EPCIS documents sent to the cloud and queries). Dashed green: Chord ring
+(OIDA) among the Fog nodes. Dashed grey: MQTT between each Edge and the Fog node serving it.
+C1–C3 mark the three contributions.</sub>
+
+**Contents:** [Overview](#overview) · [Architecture](#architecture) · [How it works](#how-it-works) ·
+[APIs](#apis) · [How to run](#how-to-run) · [Containers and AWS](#containers-and-aws) ·
+[Limitations](#limitations-of-the-prototype)
+
+---
+
+## Overview
+
+A person carries a phone (the **Edge** device) across a city whose area is split among **Fog nodes**.
+Each Fog node serves the devices in its area and records the person's **visit** there. When the
+person moves to another area, the Fog node hands the person's state over to the next one
+(**handover**), and each closed visit goes to the **cloud** as a standardized event. In the
+cloud, an authorized user rebuilds the person's **trail** (the ordered visits of a day).
+
+![Use case](docs/img/use-case.png)
+<sub>Motivating use case: a monitored person crosses the areas of several Fog nodes during the day;
+each Fog node records a piece of the trail and the cloud joins them. The vital signs are part of the
+motivation only; the prototype handles positions.</sub>
+
+![Before and after](docs/img/before-after.png)
+<sub>Centralized monitoring (before) and HTF (after): decisions near the person, context migration
+between Fog nodes, a decentralized directory and a cloud that only sees pseudonyms.</sub>
+
+The three contributions and where they live in the code:
+
+| | Contribution | Implementation |
+|---|---|---|
+| **C1** | Stateful make-before-break handover between Fog nodes, decided by a synthetic RSRP smoothed by a Kalman filter, with hysteresis (HOM) and Time to Trigger (TTT) | `fog/.../HandoverDecision.java`, `Radio.java`, `Kalman.java`, `FogNode.java` |
+| **C2** | Visits described as GS1 EPCIS 2.0 documents, with store-and-forward, and trails rebuilt in the cloud | `fog/.../Epcis.java`, `TmsClient.java`, `cloud/tms/` |
+| **C3** | Decentralized directory (OIDA) on a fault-tolerant Chord ring, indexed by salted pseudonyms | `fog/.../ChordNode.java`, `FogCommunication.java` |
+
+Human mobility comes from the **YJMob100K** dataset 2: anonymized trajectories of 25,000 users on a
+grid of 200 × 200 cells of 500 m, in 30-minute timeslots, over 75 days. Each record of a user
+becomes one ping of the Edge.
 
 ---
 
 ## Architecture
 
-```
-                    ┌──────────── Fog 8 ────────────┐          ┌──────────── Fog 4 ────────────┐
-Edge ──MQTT :1908──►│ embedded MQTT broker │ Fog    │◄──HTTP──►│ Fog    │ embedded MQTT broker │
-     (switches      │                      │ node   │  direct  │ node   │                      │
-      broker on     └──────────────────────┴───┬────┘  (P2P)   └───┬────┴──────────────────────┘
-      handover)                                │   Chord ring (OIDA) among the 16 Fog nodes
-                                               │
-                                               └──HTTP POST /capture (GS1 EPCIS 2.0) :8080──► TMS (Cloud) ◄──HTTP GET── Mobility Platform :8501
-```
-
-- **Edge → Fog: MQTT, with a broker in each Fog node.** Each Fog node has its own embedded
-  broker. The Edge connects to the broker of the Fog serving it, like a phone to its base
-  station, and switches broker when the Fog tells it to (handover).
-- **Fog ↔ Fog: direct (P2P) communication over a Chord ring.** The Fog nodes form a Chord ring
-  (the paper's OIDA Resolver) to discover addresses and to locate a user's context by
-  pseudonym, in O(log N) hops. The context goes straight from one Fog to the other over HTTP,
-  with no intermediary. The ring repairs itself when a Fog node goes down (successor list,
-  failure detection by timeout and predecessor check — see [Fog node failure](#fog-node-failure)).
-- **Fog → Cloud: HTTP POST with store-and-forward** to the TMS.
-
-| Layer | Service | Language | Folder | Role |
+| Layer | Component | Language | Folder | Role |
 |---|---|---|---|---|
-| Edge | Edge Device | Java | `edge/` | Reads the user/day from the dataset, publishes one ping per timeslot and switches broker when the Fog says so |
-| Fog | 16 Fog nodes | Java | `fog/` | Each node: embedded MQTT broker, HTTP API, Chord ring peer and handover logic |
-| Cloud | TMS — Trail Management Service | Java | `cloud/tms/` | Stores the visits and answers trail queries |
-| Cloud | CMP — Cloud Mobility Platform | Python (Streamlit) | `cloud/mobility-platform/` | Web interface: rebuilds trails and shows the charts |
+| Edge | Edge device | Java | `edge/` | Replays one user/day of the dataset: computes the pseudonym, publishes one ping per timeslot over MQTT and switches broker when the Fog node says so |
+| Fog | 16 Fog nodes | Java | `fog/` | Each node: embedded MQTT broker, HTTP API, Chord ring peer, handover logic and EPCIS adapter |
+| Cloud | TMS — Trail Management Service | Java | `cloud/tms/` | Receives the EPCIS documents (`POST /capture`), stores them and answers trail queries |
+| Cloud | CMP — Cloud Mobility Platform | Python (Streamlit) | `cloud/mobility-platform/` | Web interface: rebuilds a user's trail and shows who passed through a Fog node |
+| — | Deployment | Docker, Terraform | `deploy/`, `docker-compose.yml` | Containers and the AWS environment (one EC2 instance per node) |
 
-The city (200 × 200 cells) is split into **16 Fog nodes** of 50 × 50 cells (25 × 25 km).
-Node N covers the area at row `(N-1) / 4` and column `(N-1) % 4` of the grid.
+- **Edge → Fog: MQTT, with a broker in each Fog node.** The Edge connects to the broker of the Fog
+  node serving it, like a phone to its base station, and switches broker on handover.
+- **Fog ↔ Fog: direct (P2P) HTTP.** The nodes find each other and locate a user's context through
+  the Chord ring; the context goes straight from one node to the other.
+- **Fog → Cloud: HTTP `POST /capture`** with GS1 EPCIS 2.0 documents and store-and-forward.
+- A **visit** is a user's stay in one Fog node's area (arrival, departure, cells, pings and how it
+  ended: handover or end of day). A **trail** is the ordered list of visits of a day.
 
-A **visit** is a user's stay in one Fog node's area: arrival, departure, cells, number of pings
-and how it ended (handover to another Fog, or end of day). A user's **trail** is the ordered
-list of visits in a day.
+### The city on the cartesian plane
 
-### Ports
+![City grid](docs/img/city-grid.png)
+<sub>Left: the 200 × 200 cells split into 16 Fog areas of 50 × 50 cells (25 × 25 km); Fog N is at row
+(N−1)/4 and column (N−1)%4 counted from the bottom-left, with MQTT broker on port 1900+N and HTTP
+API on 9000+N. Fog 1 is the entry node of every Edge and the seed of the ring. Right: user 4005 on
+day 20 near the Fog 2 | Fog 3 border; the hysteresis band keeps the user in the serving node, so
+there is a single handover (13:30) instead of a back-and-forth.</sub>
 
-| Port | Service | Use |
+### Inside a Fog node
+
+![Fog node](docs/img/fog-node.png)
+<sub>Every Fog node is the same object with its own ports. All decisions run on a single logic
+thread, so the state needs no locks; HTTP handlers only enqueue work or answer from local data.</sub>
+
+### The Chord ring (OIDA)
+
+![Chord ring](docs/img/chord-ring.png)
+<sub>The ring is not an extra node: each Fog node is a peer. It stores two kinds of records:
+`fog:{id}` → address of a Fog node, and `h:{pseudonym}` → Fog node holding the user's context.</sub>
+
+---
+
+## How it works
+
+### Data path and make-before-break handover
+
+![Sequence: from the Edge to the TMS](docs/img/seq-capture.png)
+
+1. The Edge computes `h = HMAC-SHA256(salt, uid)` and enters through Fog 1, which redirects it to
+   the Fog node that owns its cell.
+2. On every ping, the serving node **A** runs the handover decision (below). While there is no
+   handover, the ping is recorded in A's open visit.
+3. When the decision picks node **B**, A finds B's address on the ring, sends it the user's
+   context (`/handover/prepare`) and only then tells the Edge to connect to B's broker.
+4. The Edge connects to B **before** leaving A (make). B activates the context, registers
+   `h:{h} → B` on the ring and confirms to A (`/handover/commit`).
+5. A closes its visit and sends it to the TMS as an EPCIS document (break). Pings that still reach
+   A during the transition are relayed to B.
+
+If a user reappears in another node without a handover (e.g. after hours offline), that node looks
+up `h:{h}` on the ring and pulls the context from the node holding it (`/handover/transfer`).
+
+### Handover decision (RSRP + Kalman + TTT)
+
+YJMob100K has no radio measurements, so the serving node computes a **synthetic RSRP** for each
+candidate node (itself, its 8 neighbors and the owner of the current cell) with the log-distance
+path loss model `RSRP = P0 − 10·n·log10(d/d0) + X_σ`, where `d` is the distance from the user's cell
+to the center of the candidate's area. Each candidate's RSRP goes through a one-dimensional
+**Kalman filter** whose state is part of the user context (it migrates with the user). Following
+the A3 event of 5G, the handover to the best neighbor B happens only when
+`RSRP_B > RSRP_A + HOM` holds for the **TTT**; this removes the ping-pong effect near borders.
+
+| Parameter | Value | Where |
 |---|---|---|
-| **1901 – 1916** | Embedded MQTT broker of Fog node N (1900 + N) | Edge ↔ Fog |
-| **9001 – 9016** | HTTP API of Fog node N (9000 + N) | Fog ↔ Fog (Chord ring and handover) |
-| **8080** | TMS (Cloud) | Visits and trails |
-| **8501** | CMP (Cloud) | Web interface — `http://localhost:8501` |
+| P0 (at d0 = 0.5 km, one cell) | −40 dBm | `fog/.../Config.java` |
+| Path loss exponent n | 3.5 | `fog/.../Config.java` |
+| Shadowing σ | 4 dB, seeded by pseudonym, ping and node (runs are reproducible) | `fog/.../Config.java` |
+| Kalman Q / R | 1 dB² / σ² | `fog/.../Config.java` |
+| HOM | 3 dB | env `HTF_HOM_DB` |
+| TTT | 60 min of dataset time (2 consecutive pings) | env `HTF_TTT_MIN` |
+| Policy | `rsrp` (default) or `area` (baseline: handover as soon as the user leaves the area) | env `HTF_HANDOVER` |
 
-The Edge always enters through **Fog 1** (broker `tcp://localhost:1901`), which forwards it to the right Fog.
+With these values, between two neighbors the switch happens about 1.2 km past the border
+(`d_A / d_B > 10^(HOM/10n)`), which creates the hysteresis band shown in the city figure.
 
-### MQTT topics (on each Fog's broker)
+### GS1 EPCIS 2.0 events
+
+When a visit closes, the node sends the TMS one EPCIS 2.0 document (JSON-LD, `application/ld+json`)
+with two `ObjectEvent`s:
+
+| EPCIS field | arriving | departing |
+|---|---|---|
+| `eventTime` | arrival (day 0 = 2026-01-01, offset +09:00) | departure |
+| `epcList` (what) | `urn:htf:pseudonym:{h}` (the uid never leaves the Edge) | same |
+| `readPoint` (where: Fog node) | `urn:epc:id:sgln:0614141.{fog:05}.0` | same |
+| `bizLocation` (where: cell) | `urn:epc:id:sgln:0614141.{fog:05}.c{x}-{y}` (first cell) | last cell |
+| `bizStep` (why) | `arriving` | `departing` |
+| `action` | `OBSERVE` | `OBSERVE` |
+| `htf:*` extensions | day, slot, fogSize | + arrivalSlot, cells, pings, reason, nextFog |
+
+`0614141` is the example GS1 Company Prefix of the GS1 standards. The TMS validates each document
+(400 if invalid), keeps it as received in `cloud/tms/data/epcis.jsonl` and derives the visit in
+`cloud/tms/data/visits.jsonl`; repeated documents are ignored (key: pseudonym, day, node, arrival).
+
+<details><summary>Example: the departing event of user 4005 at Fog 2 (day 20)</summary>
+
+```json
+{
+  "type": "ObjectEvent",
+  "eventTime": "2026-01-21T13:00:00+09:00",
+  "eventTimeZoneOffset": "+09:00",
+  "epcList": ["urn:htf:pseudonym:8f177d9fdd3ccc3df3a94581576a8a99f0b2b04ef9964cbe32734374bbbc8688"],
+  "action": "OBSERVE",
+  "bizStep": "departing",
+  "readPoint": {"id": "urn:epc:id:sgln:0614141.00002.0"},
+  "bizLocation": {"id": "urn:epc:id:sgln:0614141.00002.c118-29"},
+  "htf:day": 20, "htf:slot": 26, "htf:fogSize": 50, "htf:arrivalSlot": 0,
+  "htf:cells": [[98,24],[99,24],[98,24],[99,24],[98,24],[99,24],[96,24],[98,24],[106,26],[118,29]],
+  "htf:pings": 15, "htf:reason": "handover", "htf:nextFog": 3
+}
+```
+</details>
+
+### Rebuilding trails in the cloud
+
+![Sequence: queries of the Cloud Mobility Platform](docs/img/seq-queries.png)
+
+- **User trail:** the authorized user enters uid, day and salt; the platform computes `h` locally and
+  asks the TMS for the trail of `h`. It shows a map, a timeline, the visits and the EPCIS events.
+- **People at a Fog node:** the platform lists the nodes with visits on a day, then the pseudonyms
+  that passed through the chosen node and their trails (where each person came from and went to).
+
+### Privacy
+
+Only the pseudonym `h` travels: Fog nodes, the ring and the TMS never see the uid, and the TMS has
+neither the salt nor any identity ("blind" cloud). The platform recomputes `h` on the client for an
+authorized user. The "people at a Fog node" view uses no uid or salt, but a full-day trail may still
+re-identify someone (home and work), so such queries must be restricted to authorized profiles.
+
+---
+
+## APIs
+
+### MQTT topics (on each Fog node's broker)
 
 | Topic | From → To | Content |
 |---|---|---|
-| `htf/pings` | Edge → Fog | One ping per timeslot `{h, day, t, time, x, y, seq}`; at the end of the day, `{type: "end"}` |
-| `htf/edge/{h}/control` | Fog → Edge | Handover command: `{type: "handover", fog: 4, broker: "tcp://localhost:1904"}` |
+| `htf/pings` | Edge → Fog | One ping per timeslot `{h, day, t, time, x, y, seq}`; at the end of the day `{type: "end"}` |
+| `htf/edge/{h}/control` | Fog → Edge | Handover command `{type: "handover", fog: 3, broker: "tcp://host:1903"}` |
 
 ### HTTP API of each Fog node (port 9000 + N)
 
@@ -73,82 +205,26 @@ The Edge always enters through **Fog 1** (broker `tcp://localhost:1901`), which 
 | `GET` | `/chord/info` | Node, successor and predecessor on the ring |
 | `POST` | `/chord/closest` | One lookup step: closest node to the key in the finger table |
 | `POST` | `/chord/notify` | "May I be your predecessor?" (ring stabilization) |
-| `POST` | `/dht/put` · `GET /dht/get?key=` · `POST /dht/bulk` | Store, read and migrate ring records |
-| `POST` | `/handover/prepare` | Fog A hands the user's context to Fog B (before the user arrives) |
-| `POST` | `/handover/ping` | Relay of a ping that still reached the old Fog (or the entry node) |
-| `POST` | `/handover/commit` | Fog B reports that the user arrived; Fog A closes its visit |
-| `POST` | `/handover/transfer` | A new Fog asks for the context of a user who reappeared there |
-| `GET` | `/status` | Node and ring state: successor list, predecessor, finger table (useful for debugging) |
-| `POST` | `/admin/crash` | Simulates a crash of the node (stops its broker, API and timers without warning anyone) |
-
-Records on the Chord ring: `fog:{id}` → node address; `h:{pseudonym}` → Fog node holding the user's context.
+| `POST` / `GET` | `/dht/put` · `/dht/get?key=` · `/dht/bulk` | Store, read and migrate ring records |
+| `POST` | `/handover/prepare` | Node A hands the user's context to node B before the user arrives |
+| `POST` | `/handover/ping` | Relay of a ping that still reached the old node (or the entry node) |
+| `POST` | `/handover/commit` | Node B reports that the user arrived; node A closes its visit |
+| `POST` | `/handover/transfer` | A node asks for the context of a user who reappeared there |
+| `GET` | `/status` | Successor list, predecessor and finger table (debugging) |
+| `POST` | `/admin/crash` | Simulates a crash (stops broker, API and timers without warning anyone) |
 
 ### TMS HTTP API (port 8080)
 
 | Method | Endpoint | Called by | Purpose |
 |---|---|---|---|
-| `POST` | `/capture` | Fog | Receives a visit as a GS1 EPCIS 2.0 document (201 = new, 200 = repeated, 400 = invalid) |
-| `GET` | `/events/{h}?day=20` | CMP | EPCIS events (arriving/departing) of pseudonym `h` on the day, in time order |
-| `GET` | `/trail/{h}?day=20` | CMP | Returns the person's trail (visits of pseudonym `h` on the day, in order) |
-| `GET` | `/visits?fog=6&day=20` | CMP | Visits recorded by Fog 6 on day 20 (who passed through it) |
+| `POST` | `/capture` | Fog | Receives a visit as a GS1 EPCIS 2.0 document (201 new, 200 repeated, 400 invalid) |
+| `GET` | `/events/{h}?day=20` | CMP | EPCIS events of pseudonym `h` on the day, in time order |
+| `GET` | `/trail/{h}?day=20` | CMP | Trail of `h` on the day (visits in arrival order) |
+| `GET` | `/visits?fog=6&day=20` | CMP | Visits recorded by Fog 6 on day 20 |
 | `GET` | `/fogs?day=20` | CMP | Fog nodes with visits on the day: `[{fog, people, visits}]` |
-| `GET` | `/health` | anyone | Checks whether the TMS is up |
+| `GET` | `/health` | anyone | Is the TMS up? |
 
-The TMS keeps each EPCIS document as received in `cloud/tms/data/epcis.jsonl` (event repository)
-and the visit derived from it in `cloud/tms/data/visits.jsonl` (used by the trail queries). Every
-query reads these files, so data from previous runs shows up without restarting the TMS (and
-deleting them clears the queries right away).
-
-### Handover decision (RSRP + Kalman + TTT)
-
-YJMob100K has no radio measurements, so the serving Fog generates a **synthetic RSRP** for itself
-and for its neighbors on every ping, with the log-distance path loss model
-`RSRP = P0 − 10·n·log10(d/d0) + X_σ`, where `d` is the distance from the user's cell to the center
-of each Fog's area. Each Fog's RSRP goes through a **Kalman filter** (its state is part of the user
-context and migrates with the user). The handover to neighbor B is triggered only when
-`RSRP_B > RSRP_serving + HOM` holds for the **Time to Trigger (TTT)**; this removes the ping-pong
-effect near area borders.
-
-| Parameter | Value | Where |
-|---|---|---|
-| P0 (at d0 = 0.5 km, one cell) | −40 dBm | `fog/Config.java` |
-| Path loss exponent n | 3.5 | `fog/Config.java` |
-| Shadowing σ | 4 dB (seeded by pseudonym, ping and Fog: runs are reproducible) | `fog/Config.java` |
-| Kalman Q / R | 1.0 / σ² | `fog/Config.java` |
-| HOM (hysteresis) | 3 dB | env `HTF_HOM_DB` |
-| TTT | 60 min of dataset time (2 pings) | env `HTF_TTT_MIN` |
-| Policy | `rsrp` (default) or `area` (handover as soon as the user leaves the area: baseline) | env `HTF_HANDOVER` |
-
-To compare with the baseline, start the Fog with `HTF_HANDOVER=area mvn -q compile exec:exec`.
-
-### GS1 EPCIS 2.0 events
-
-When a visit closes (handover or end of day), the Fog sends it to the TMS as an EPCIS 2.0 document
-(JSON-LD) with two `ObjectEvent`s:
-
-| EPCIS field | arriving | departing |
-|---|---|---|
-| `eventTime` | arrival (day 0 = 2026-01-01, offset +09:00) | departure |
-| `epcList` (what) | `urn:htf:pseudonym:{h}` (the real id never leaves the Edge) | same |
-| `readPoint` (where: Fog) | `urn:epc:id:sgln:0614141.{fog:05}.0` | same |
-| `bizLocation` (where: cell) | `urn:epc:id:sgln:0614141.{fog:05}.c{x}-{y}` (first cell) | last cell |
-| `bizStep` (why) | `arriving` | `departing` |
-| `action` | `OBSERVE` | `OBSERVE` |
-| `htf:*` extensions | day, slot, fogSize | + arrivalSlot, cells, pings, reason, nextFog |
-
-`0614141` is the example GS1 Company Prefix used in the GS1 standards. The CMP shows the events of a
-trail in the expander **GS1 EPCIS events received by the TMS**, and they can be read with
-`curl 'localhost:8080/events/{h}?day=20'`.
-
-### Privacy
-
-The dataset `uid` never leaves the Edge: only the pseudonym `h = HMAC-SHA256(salt, uid)` travels.
-Fogs, the Chord ring and the TMS store only `h` ("blind" cloud). The CMP receives the uid of the
-authorized user, computes `h` locally with the same salt and only then queries the TMS.
-
-In the **People at a Fog node** query the CMP uses neither uid nor salt: it only sees pseudonyms
-(city manager view). Even so, a full-day trail may re-identify someone (home/work), a point to
-discuss in the privacy model.
+Every query re-reads the JSONL files, so data from previous runs shows up without restarting the TMS.
 
 ---
 
@@ -160,11 +236,10 @@ discuss in the privacy model.
 |---|---|---|
 | JDK 17+ | `java -version` | `brew install openjdk@21` |
 | Maven | `mvn -v` | `brew install maven` |
-| Python 3.11+ | `python3 --version` | python.org or `brew install python` |
+| Python 3.11+ | `python3 --version` | `brew install python` |
 
-There is no need to install or start Mosquitto: each Fog node ships its own embedded broker.
-
-CMP Python environment, **outside iCloud** (inside iCloud Drive Python becomes very slow):
+No Mosquitto is needed: each Fog node ships its own embedded broker (Moquette). Create the platform's
+Python environment **outside iCloud** (inside iCloud Drive Python becomes very slow):
 
 ```bash
 python3 -m venv ~/.venvs/htf
@@ -172,65 +247,31 @@ source ~/.venvs/htf/bin/activate
 pip install -r cloud/mobility-platform/requirements.txt
 ```
 
-The dataset must be at `YJMob100K/yjmob100k-dataset2.csv`. If the project is in
-iCloud, mark the `YJMob100K` folder as **"Keep Downloaded"** in Finder.
+The dataset must be at `YJMob100K/yjmob100k-dataset2.csv`. If the project is in iCloud, mark the
+project folder as **Keep Downloaded** in Finder.
 
 ### Step by step
 
-All commands start from the project root. Use one terminal per service, **in this order**.
-
-**1. TMS (Cloud)**
+From the project root, one terminal per service, **in this order**:
 
 ```bash
-cd cloud/tms && mvn -q compile exec:exec
-```
-Wait for: `[TMS] listening on http://localhost:8080`.
-
-**2. Fog — the 16 nodes** (keep it running)
-
-```bash
-cd fog && mvn -q compile exec:exec
-```
-Each node starts its broker and its API, joins the Chord ring through Fog 1 and the ring stabilizes.
-Wait (≈ 5–10 s) for:
-```
-[Fog   ] Chord ring ready with 16 nodes (ring order: [1, 10, 6, 8, ...])
-[Fog   ] you can run the Edge now.
-```
-
-**3. Edge** (publishes the user/day and exits)
-
-```bash
-cd edge && mvn -q compile exec:exec
-```
-
-The Fog terminal shows the entry through Fog 1, the ring lookups (`OIDA: ... (3 hops)`),
-the handovers (`PREPARE`, `COMMIT`) and the visits sent to the TMS. The Edge terminal shows the
-commands received and the broker switches (`HANDOVER: now connected to Fog 4`).
-
-**4. Cloud Mobility Platform**
-
-```bash
+cd cloud/tms && mvn -q compile exec:exec     # 1. TMS: wait for "[TMS] listening on http://localhost:8080"
+cd fog && mvn -q compile exec:exec           # 2. the 16 Fog nodes: wait for "Chord ring ready with 16 nodes"
+cd edge && mvn -q compile exec:exec          # 3. Edge: replays the user/day and exits
 source ~/.venvs/htf/bin/activate
-cd cloud/mobility-platform && streamlit run mobility_platform.py
+cd cloud/mobility-platform && streamlit run mobility_platform.py   # 4. platform: http://localhost:8501
 ```
-Opens at **http://localhost:8501**. In the sidebar, choose the query type:
 
-- **User trail**: enter the user (uid) and day and click **Rebuild trail**.
-- **People at a Fog node**: enter the day, choose the Fog (the list only shows Fogs with
-  visits on that day and how many people passed through each one) and click **Query Fog node**.
-  It shows the map with each person's trail (queried Fog highlighted), the timeline of presence
-  at the Fog and the table of visits with where each person came from and where they went.
+Always use `exec:exec` (not `exec:java`). The Fog terminal shows the entry through Fog 1, the ring
+lookups, the handover decisions and the documents sent to the TMS; the Edge terminal shows the
+broker switches. By default the Edge replays **user 4005 on day 20**; another user or day:
+`HTF_USER=4000 HTF_DAY=20 mvn -q compile exec:exec` (TMS and Fog keep running).
 
-> Always use `mvn -q compile exec:exec` (not `exec:java`). The Fog must be running
-> (ring ready) before the Edge.
+### Expected result
 
-### Expected result (user 4000, day 20)
-
-13 pings · 2 Fog nodes (8 and 4) · **1 handover** · 08:30–18:00. The user moves along the border
-between Fogs 8 and 4 (y = 50). With the RSRP policy the handover happens once, after the condition
-held for the TTT; with `HTF_HANDOVER=area` the same user makes **4 handovers** back and forth
-(ping-pong effect).
+- **User 4005, day 20** (city figure): 27 pings, Fog 2 → Fog 3, **1 handover** at 13:30.
+- **User 4000, day 20:** 13 pings, Fog 8 → Fog 4, **1 handover** with the RSRP policy; with
+  `HTF_HANDOVER=area` the same user makes **4 handovers** back and forth along the border (y = 50).
 
 ```
 [Fog  1] user 0fe28881... outside my area -> redirected to Fog 8
@@ -244,38 +285,30 @@ held for the TTT; with `HTF_HANDOVER=area` the same user makes **4 handovers** b
 [TMS ] POST /capture (EPCIS) Fog 8 08:30-10:00 -> HTTP 201
 ```
 
-### One Fog node per process (as in containers)
+### One Fog node per process
 
-By default the 16 nodes start in the same process, but they share nothing: they only talk over the network.
-To start separate nodes, use `HTF_FOG_IDS` (Fog 1 is the ring seed and must start first):
+The 16 nodes start in one process by default, but they share nothing. To start them separately
+(Fog 1 is the seed of the ring; the others keep retrying until it is up):
 
 ```bash
 cd fog && HTF_FOG_IDS=1 mvn -q compile exec:exec        # terminal A
 cd fog && HTF_FOG_IDS=2-16 mvn -q compile exec:exec     # terminal B (or one per node: HTF_FOG_IDS=8)
 ```
 
-In containers, `HTF_FOG_HOST` sets the host name advertised by the node and `HTF_FOG_SEED`
-the URL of Fog 1 (default `http://localhost:9001`).
-
 ### Fog node failure
 
-The Chord ring follows the full Chord protocol (Stoica et al., 2001), so it repairs itself when a Fog node goes down:
+The ring follows the Chord protocol (Stoica et al., 2001) and repairs itself:
 
-- **Successor list:** each node keeps its next 3 nodes on the ring (`SUCCESSOR_LIST_SIZE`), copied
-  from its successor every 500 ms. If the successor goes down, the next one in the list takes its place,
-  so the ring survives up to 2 consecutive nodes failing at once.
-- **Failure detection:** a node is considered down when its port refuses the connection, or when it
-  does not answer within 1.5 s twice in a row (`FAILURE_TIMEOUT_MS`). It is removed from the successor
-  list and the finger table, and lookups that hit it start again around it.
-- **Predecessor check:** every 500 ms each node pings its predecessor; if it is down, it is cleared and
-  the next node that notifies becomes the new predecessor.
-- **Stale addresses:** every Fog republishes its `fog:{id}` record every 3 s; a record not refreshed for
-  10 s (`ADDRESS_TTL_MS`) is treated as a Fog that is down, so no one keeps sending users to it.
-
-To see it, with the Fog running, crash one node (Fog 8 sits between Fog 6 and Fog 15 on the ring):
+- **Successor list:** each node keeps its next 3 nodes, copied from its successor every 500 ms; the
+  ring survives up to 2 consecutive nodes failing at once.
+- **Failure detection:** a node is down when its port refuses the connection, or when it does not
+  answer within 1.5 s twice in a row; it is removed from the successor list and the finger table.
+- **Predecessor check:** every 500 ms; a dead predecessor is cleared and the next node that notifies
+  takes its place.
+- **Stale addresses:** each node republishes `fog:{id}` every 3 s; a record older than 10 s is ignored.
 
 ```bash
-curl -X POST localhost:9008/admin/crash
+curl -X POST localhost:9008/admin/crash      # Fog 8 sits between Fog 6 and Fog 15 on the ring
 ```
 
 ```
@@ -285,174 +318,73 @@ curl -X POST localhost:9008/admin/crash
 [Fog 15] Chord: new predecessor Fog 6 (ring repaired)
 ```
 
-`curl localhost:9006/status` then shows Fog 6 with the successor list `[15, 12, 4]`.
-
-What this version does **not** recover yet: records stored only on the failed node (the `h:{pseudonym}`
-entries it held; there is no replication), the contexts and open visits that were in its memory, and the
-Edge connected to its broker (the Edge does not reconnect elsewhere). Visits already sent to the TMS are safe.
-If Fog 1 (the seed) goes down, the ring keeps working, but new nodes and new Edges cannot enter through it.
-
-### Another user or day
-
-Change `USER` and `DAY` in `edge/src/main/java/edge/Config.java` and run only step 3 again
-(TMS and Fog keep running). In the CMP, query the new user/day.
-
-### Stopping
-
-`Ctrl+C` in the TMS, Fog and CMP terminals. The data is kept in `cloud/tms/data/epcis.jsonl`
-and `cloud/tms/data/visits.jsonl`; delete both files to start from scratch.
-
-### Useful tools
-
-```bash
-curl localhost:9008/status                   # state of Fog 8 on the ring (successor list, predecessor, finger table)
-curl -X POST localhost:9008/admin/crash      # simulate Fog 8 going down (see "Fog node failure")
-curl localhost:8080/health                   # is the TMS up?
-curl 'localhost:8080/fogs?day=20'            # Fogs with visits on day 20
-curl 'localhost:8080/visits?fog=6&day=20'    # who passed through Fog 6 on day 20
-curl "localhost:8080/events/$H?day=20"        # EPCIS events of pseudonym $H on day 20
-mosquitto_sub -p 1908 -t 'htf/#' -v          # messages on Fog 8's broker (requires Mosquitto installed)
-lsof -i :9001                                # who is using Fog 1's port
-```
-
-## Sequence diagrams (section 4.3 of the paper)
-
-### Entry, make-before-break handover and sending to the TMS
-
-The Fog decides the handover and commands the Edge; the target Fog receives the context before
-the user arrives (make-before-break); the context goes directly between the Fogs (P2P).
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant E as Edge Device
-    participant F1 as Fog 1 (entry)
-    participant FA as Fog A
-    participant C as Chord ring (OIDA)
-    participant FB as Fog B
-    participant T as TMS (Cloud)
-
-    E->>E: h = HMAC-SHA256(salt, uid)
-    E->>F1: MQTT (Fog 1 broker) PUBLISH htf/pings {h, x, y}
-    F1->>C: get("fog:A")  — O(log N) hops
-    C-->>F1: address of Fog A
-    F1->>E: MQTT htf/edge/{h}/control {connect to Fog A}
-    F1->>FA: HTTP POST /handover/ping (ping relay)
-    FA->>C: get("h:{h}") — no previous context
-    FA->>C: put("h:{h}", A)
-    E->>FA: connects to Fog A's broker (and drops Fog 1's)
-
-    loop one ping per timeslot
-        E->>FA: MQTT PUBLISH htf/pings
-        FA->>FA: synthetic RSRP of A and neighbors → Kalman filter
-        alt no neighbor above A + HOM for the TTT
-            FA->>FA: records it in the open visit
-        else RSRP of B > RSRP of A + HOM during the TTT
-            FA->>C: get("fog:B")
-            C-->>FA: address of Fog B
-            FA->>FB: HTTP POST /handover/prepare {context of h}
-            FB-->>FA: 200 (B ready — make)
-            FA->>E: MQTT htf/edge/{h}/control {connect to Fog B}
-            E->>FB: connects to Fog B's broker, then drops Fog A's
-            E->>FB: MQTT PUBLISH htf/pings (next ping)
-            FB->>FB: activates the context and opens a new visit
-            FB->>C: put("h:{h}", B)
-            FB->>FA: HTTP POST /handover/commit
-            FA->>T: HTTP POST /capture — EPCIS arriving + departing (reason = handover) — break
-            T-->>FA: 201
-            Note over FA,FB: pings that still reach Fog A are relayed to B (POST /handover/ping)
-        end
-    end
-    E->>FB: MQTT PUBLISH htf/pings {type: "end"}
-    FB->>T: HTTP POST /capture — EPCIS (reason = end_of_day)
-    T-->>FB: 201
-```
-
-### User reappears in another Fog (locating the context through the ring)
-
-When a Fog receives a user without a handover having happened (e.g. they were offline for
-hours), it looks up on the Chord ring who holds their context and pulls it directly.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant E as Edge Device
-    participant FX as Fog X (new)
-    participant C as Chord ring (OIDA)
-    participant FY as Fog Y (old)
-    participant T as TMS (Cloud)
-
-    E->>FX: MQTT PUBLISH htf/pings {h, x, y}
-    FX->>C: get("h:{h}") — O(log N) hops
-    C-->>FX: context is at Fog Y
-    FX->>C: get("fog:Y")
-    C-->>FX: address of Fog Y
-    FX->>FY: HTTP POST /handover/transfer {h}
-    FY->>T: HTTP POST /capture (EPCIS, closes the old visit)
-    FY-->>FX: 200 {context of h}
-    FX->>C: put("h:{h}", X)
-    FX->>FX: continues the trail with the recovered context
-```
-
-### Fog node failure and ring repair
-
 ```mermaid
 sequenceDiagram
     autonumber
     participant F6 as Fog 6 (predecessor)
     participant F8 as Fog 8 (down)
     participant F15 as Fog 15 (successor)
-
     Note over F8: crashes (no warning)
     F6-xF8: stabilize: GET /chord/info (refused / timeout ×2)
-    F6->>F6: remove Fog 8 from successor list and fingers
     F6->>F6: successor list [8, 15, 12] → [15, 12, 4]
     F15-xF8: check_predecessor (refused / timeout ×2)
     F15->>F15: predecessor = none
-    F6->>F15: GET /chord/info (copy its successor list)
     F6->>F15: POST /chord/notify
     F15->>F15: predecessor = Fog 6 — ring repaired
 ```
 
-### Rebuilding a user's trail in the Cloud
+Not recovered in this version: the `h:{pseudonym}` records stored only on the failed node (keys are
+not replicated), the contexts and open visits in its memory, and the Edges connected to its broker.
+Visits already sent to the TMS are safe.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as Authorized user
-    participant P as Cloud Mobility Platform
-    participant T as TMS (Cloud)
+### Stopping and useful commands
 
-    U->>P: uid, day and salt
-    P->>P: h = HMAC-SHA256(salt, uid) on the client
-    P->>T: GET /trail/{h}?day=20
-    T-->>P: 200 [visits in arrival order]
-    P->>P: summary, map, timeline and table
-    P-->>U: rebuilt digital trail
+`Ctrl+C` in each terminal. The data stays in `cloud/tms/data/epcis.jsonl` and `visits.jsonl`;
+delete both files to start from scratch.
+
+```bash
+curl localhost:9008/status                   # Fog 8 on the ring: successor list, predecessor, fingers
+curl localhost:8080/health                   # is the TMS up?
+curl 'localhost:8080/fogs?day=20'            # Fog nodes with visits on day 20
+curl 'localhost:8080/visits?fog=6&day=20'    # who passed through Fog 6 on day 20
+curl "localhost:8080/events/$H?day=20"       # EPCIS events of pseudonym $H on day 20
 ```
 
-### Query by Fog node (who passed through it)
+---
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor G as City manager
-    participant P as Cloud Mobility Platform
-    participant T as TMS (Cloud)
-    participant A as visits.jsonl
+## Containers and AWS
 
-    G->>P: day
-    P->>T: GET /fogs?day=20
-    T->>A: reads the file
-    T-->>P: 200 [{fog, people, visits}]
-    G->>P: chooses Fog 6
-    P->>T: GET /visits?fog=6&day=20
-    T->>A: reads the file
-    T-->>P: 200 [visits to Fog 6] (pseudonyms h only)
-    loop for each pseudonym h
-        P->>T: GET /trail/{h}?day=20
-        T-->>P: 200 [trail of the day]
-    end
-    P->>P: map of the trails, presence at the Fog, came from / went to
-    P-->>G: people who passed through Fog 6
-```
+Each component has a `Dockerfile` (`fog/`, `cloud/tms/`, `cloud/mobility-platform/`, `edge/`) and
+reads its settings from `HTF_*` environment variables (the defaults are the local run).
+
+- **Local, with Docker:** `deploy/extract-users.sh 4005 && docker compose up --build`, then open
+  http://localhost:8501 (the 16 Fog nodes run in one container).
+- **AWS, one EC2 instance per node** (16 Fog nodes, TMS, platform and 2 Edges), created with
+  Terraform — see [deploy/aws/README.md](deploy/aws/README.md). `deploy/aws/up.sh` creates everything,
+  `deploy/aws/crash-fog.sh N` simulates a node failure and `deploy/aws/down.sh` destroys everything.
+
+| Variable | Component | Meaning (default) |
+|---|---|---|
+| `HTF_FOG_IDS`, `HTF_FOG_HOST`, `HTF_FOG_SEED` | Fog | Nodes to start (all), advertised host (`localhost`), seed URL (`http://localhost:9001`) |
+| `HTF_TMS_URL` | Fog, platform | TMS address (`http://localhost:8080`) |
+| `HTF_HANDOVER`, `HTF_HOM_DB`, `HTF_TTT_MIN` | Fog | Handover policy (`rsrp`), HOM (3 dB), TTT (60 min) |
+| `HTF_USER`, `HTF_DAY`, `HTF_DATASET` | Edge | Simulated user (4005), day (20), dataset CSV |
+| `HTF_ENTRY_BROKER`, `HTF_PING_INTERVAL_MS` | Edge | Entry broker (`tcp://localhost:1901`), real time between pings (1000 ms) |
+| `HTF_START_DELAY_S`, `HTF_CONNECT_RETRY_S` | Edge | Wait before starting (0 s), keep retrying the broker for (0 s) |
+| `HTF_SALT` | Edge, platform | Pseudonym secret (`htf-dev-salt`) |
+
+---
+
+## Limitations of the prototype
+
+- The TMS stores JSONL files; the design uses PostgreSQL with PostGIS, sharded by region.
+- The store-and-forward queue of each Fog node is in memory: it survives a TMS outage, not a crash
+  of the node itself.
+- No vital signs are collected: the evaluation uses the positions of YJMob100K.
+- All devices share one salt and the pseudonym is fixed; a real deployment would give each device
+  only its own `h` (or a per-person secret), rotate pseudonyms daily and authenticate devices on the
+  brokers (MQTT over TLS).
+- Ring records are not replicated, and the Fog nodes are organized in a single level (regional Fog
+  nodes are future work).
+- The embedded broker is Moquette 0.17, the latest release on Maven Central; the fix for
+  CVE-2026-85724 (0.18.x) is only published on GitHub.

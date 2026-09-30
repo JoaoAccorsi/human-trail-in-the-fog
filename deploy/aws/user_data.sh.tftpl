@@ -1,0 +1,30 @@
+#!/bin/bash
+# Boot script of an HTF node: installs Docker and runs the node's container (see /opt/htf/run.sh).
+set -euxo pipefail
+dnf install -y docker
+systemctl enable --now docker
+mkdir -p /opt/htf/data
+
+cat > /opt/htf/run.sh <<'RUN'
+#!/bin/bash
+# (Re)starts this node's container with the latest image from ECR.
+set -eu
+REGION="${region}"
+REGISTRY="${registry}"
+IMAGE="$REGISTRY/htf/${image}:${tag}"
+# The images may be pushed after the instance boots: keep trying until the pull works.
+until aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$REGISTRY" \
+      && docker pull "$IMAGE"; do
+  echo "waiting for image $IMAGE ..."; sleep 15
+done
+docker rm -f ${name} 2>/dev/null || true
+docker run -d --name ${name} --network host --restart ${restart} \
+  --log-driver awslogs --log-opt awslogs-region="$REGION" \
+  --log-opt awslogs-group=${log_group} --log-opt awslogs-stream=${name} \
+%{ for k, v in env ~}
+  -e ${k}=${v} \
+%{ endfor ~}
+  ${volume} "$IMAGE"
+RUN
+chmod +x /opt/htf/run.sh
+/opt/htf/run.sh
