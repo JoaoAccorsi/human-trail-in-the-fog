@@ -257,7 +257,7 @@ final class FogNode {
         ctx.handovers++;
         ctx.triggerPing = p;
         try {
-            Rpc.post(b.http + "/handover/prepare", ctx);                   // 1. PREPARE directly on Fog B
+            FogCommunication.post(b.http + "/handover/prepare", ctx);                   // 1. PREPARE directly on Fog B
         } catch (IOException e) {
             log("PREPARE to Fog %d failed (%s); keeping the user here", target, e.getMessage());
             addresses.remove(target);
@@ -287,7 +287,7 @@ final class FogNode {
         JsonObject commit = new JsonObject();
         commit.addProperty("h", h);
         commit.addProperty("nextFog", id);
-        Rpc.postAsync(origin.http + "/handover/commit", commit);          // 3. COMMIT to Fog A
+        FogCommunication.postAsync(origin.http + "/handover/commit", commit);          // 3. COMMIT to Fog A
     }
 
     /** On the origin: the target confirmed; closes the visit and sends it to the TMS. */
@@ -408,7 +408,7 @@ final class FogNode {
             JsonObject body = new JsonObject();
             body.addProperty("h", h);
             body.addProperty("nextFog", id);
-            JsonElement r = Rpc.post(a.http + "/handover/transfer", body);
+            JsonElement r = FogCommunication.post(a.http + "/handover/transfer", body);
             return r == null ? null : FogApp.JSON.fromJson(r, Context.class);
         } catch (IOException e) {
             return null;                                // owner no longer has the context
@@ -417,7 +417,7 @@ final class FogNode {
 
     private void relay(NodeRef b, Ping p) {
         try {
-            Rpc.post(b.http + "/handover/ping", p);
+            FogCommunication.post(b.http + "/handover/ping", p);
             log("ping %s of %s... relayed to Fog %d", p.time == null ? p.type : p.time, brief(p.h), b.fogId);
         } catch (IOException e) {
             log("failed to relay ping to Fog %d (%s)", b.fogId, e.getMessage());
@@ -443,33 +443,33 @@ final class FogNode {
 
     private void registerHandoverRoutes() {
         http.createContext("/handover/prepare", ex -> {
-            Context ctx = FogApp.JSON.fromJson(Rpc.body(ex), Context.class);
+            Context ctx = FogApp.JSON.fromJson(FogCommunication.body(ex), Context.class);
             prepared.put(ctx.h, ctx);
             log("PREPARE received from Fog %d for user %s...", ctx.origin.fogId, brief(ctx.h));
-            Rpc.respond(ex, 200, "{\"ok\":true}");
+            FogCommunication.respond(ex, 200, "{\"ok\":true}");
         });
         http.createContext("/handover/ping", ex -> {
-            Ping p = FogApp.JSON.fromJson(Rpc.body(ex), Ping.class);
+            Ping p = FogApp.JSON.fromJson(FogCommunication.body(ex), Ping.class);
             logic.execute(() -> safely(() -> onPing(p)));
-            Rpc.respond(ex, 202, null);
+            FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/handover/commit", ex -> {
-            JsonObject b = JsonParser.parseString(Rpc.body(ex)).getAsJsonObject();
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             String h = b.get("h").getAsString();
             int nextFog = b.get("nextFog").getAsInt();
             logic.execute(() -> safely(() -> completeHandover(h, nextFog)));
-            Rpc.respond(ex, 202, null);
+            FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/handover/transfer", ex -> {
-            JsonObject b = JsonParser.parseString(Rpc.body(ex)).getAsJsonObject();
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             String h = b.get("h").getAsString();
             int nextFog = b.get("nextFog").getAsInt();
             Future<Context> f = logic.submit(() -> handOverContext(h, nextFog));
             try {
                 Context ctx = f.get(5, TimeUnit.SECONDS);
-                Rpc.respond(ex, ctx == null ? 404 : 200, ctx);
+                FogCommunication.respond(ex, ctx == null ? 404 : 200, ctx);
             } catch (Exception e) {
-                Rpc.respond(ex, 500, null);
+                FogCommunication.respond(ex, 500, null);
             }
         });
         http.createContext("/status", ex -> {
@@ -477,10 +477,10 @@ final class FogNode {
             r.addProperty("fog", id);
             r.add("chord", chord.state());
             r.addProperty("users", contexts.size());
-            Rpc.respond(ex, 200, r);
+            FogCommunication.respond(ex, 200, r);
         });
         http.createContext("/admin/crash", ex -> {
-            Rpc.respond(ex, 202, "{\"ok\":true}");
+            FogCommunication.respond(ex, 202, "{\"ok\":true}");
             Thread t = new Thread(() -> {
                 log("SIMULATED CRASH: broker, HTTP API and timers stopped without telling anyone");
                 stop();

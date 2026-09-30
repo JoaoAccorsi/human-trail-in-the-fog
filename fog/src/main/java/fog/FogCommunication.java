@@ -14,14 +14,17 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonParser;
 import com.sun.net.httpserver.HttpExchange;
 
-/** HTTP/JSON calls between Fog nodes (direct communication, no intermediary). */
-final class Rpc {
+/**
+ * Direct communication between Fog nodes: HTTP/JSON calls (RPC) with no intermediary.
+ * Used by the Chord ring (ChordNode) and by the handover protocol (FogNode).
+ */
+final class FogCommunication {
 
     private static final HttpClient HTTP = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(2))
             .build();
 
-    private Rpc() {
+    private FogCommunication() {
     }
 
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(5);

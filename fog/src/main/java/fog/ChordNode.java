@@ -144,7 +144,7 @@ final class ChordNode {
     }
 
     void join(String seedUrl) throws IOException {
-        NodeRef seed = FogApp.JSON.fromJson(Rpc.get(seedUrl + "/chord/info").getAsJsonObject().get("self"),
+        NodeRef seed = FogApp.JSON.fromJson(FogCommunication.get(seedUrl + "/chord/info").getAsJsonObject().get("self"),
                 NodeRef.class);
         NodeRef succ = findSuccessor(self.id, seed).node();
         setSuccessors(List.of(succ));
@@ -169,7 +169,7 @@ final class ChordNode {
         }
         JsonObject info;
         try {
-            info = Rpc.get(succ.http + "/chord/info", TIMEOUT).getAsJsonObject();
+            info = FogCommunication.get(succ.http + "/chord/info", TIMEOUT).getAsJsonObject();
             alive(succ);
         } catch (IOException e) {
             failed(succ, e);
@@ -178,7 +178,7 @@ final class ChordNode {
         NodeRef x = ref(info.get("predecessor"));
         if (x != null && !x.equals(self) && between(x.id, self.id, succ.id)) {
             try {                                // a node joined between us and the successor
-                info = Rpc.get(x.http + "/chord/info", TIMEOUT).getAsJsonObject();
+                info = FogCommunication.get(x.http + "/chord/info", TIMEOUT).getAsJsonObject();
                 succ = x;
             } catch (IOException e) {
                 // x is down: keep the current successor
@@ -196,7 +196,7 @@ final class ChordNode {
         }
         setSuccessors(list);
         try {
-            Rpc.post(succ.http + "/chord/notify", self, TIMEOUT);
+            FogCommunication.post(succ.http + "/chord/notify", self, TIMEOUT);
         } catch (IOException e) {
             failed(succ, e);
         }
@@ -209,7 +209,7 @@ final class ChordNode {
             return;
         }
         try {
-            Rpc.get(p.http + "/chord/info", TIMEOUT);
+            FogCommunication.get(p.http + "/chord/info", TIMEOUT);
             alive(p);
         } catch (IOException e) {
             failed(p, e);
@@ -233,10 +233,10 @@ final class ChordNode {
 
     /** A call to n failed. Refused connection = down now; a timeout needs a second strike. */
     private void failed(NodeRef n, IOException e) {
-        if (Rpc.answered(e)) {
+        if (FogCommunication.answered(e)) {
             return;                              // it answered with an HTTP error: it is up
         }
-        int s = Rpc.refused(e) ? 2 : strikes.merge(n.id, 1, Integer::sum);
+        int s = FogCommunication.refused(e) ? 2 : strikes.merge(n.id, 1, Integer::sum);
         if (s >= 2) {
             strikes.remove(n.id);
             nodeDown(n);
@@ -317,7 +317,7 @@ final class ChordNode {
                 body.addProperty("key", key);
                 JsonObject r;
                 try {
-                    r = Rpc.post(n.http + "/chord/closest", body, TIMEOUT).getAsJsonObject();
+                    r = FogCommunication.post(n.http + "/chord/closest", body, TIMEOUT).getAsJsonObject();
                 } catch (IOException e) {
                     throw new Unreachable(n, e);
                 }
@@ -368,10 +368,10 @@ final class ChordNode {
             body.addProperty("key", key);
             body.add("value", v);
             try {
-                Rpc.post(l.node().http + "/dht/put", body, TIMEOUT);
+                FogCommunication.post(l.node().http + "/dht/put", body, TIMEOUT);
                 return l;
             } catch (IOException e) {
-                if (Rpc.answered(e) || attempt > 0) {
+                if (FogCommunication.answered(e) || attempt > 0) {
                     throw e;
                 }
                 failed(l.node(), e);             // responsible node did not answer: look up again
@@ -387,12 +387,12 @@ final class ChordNode {
             }
             try {
                 String url = l.node().http + "/dht/get?key=" + URLEncoder.encode(key, StandardCharsets.UTF_8);
-                return new Value(Rpc.get(url, TIMEOUT), l.hops() + 1, l.node());
+                return new Value(FogCommunication.get(url, TIMEOUT), l.hops() + 1, l.node());
             } catch (IOException e) {
                 if (e.getMessage() != null && e.getMessage().startsWith("HTTP 404")) {
                     return new Value(null, l.hops() + 1, l.node());
                 }
-                if (Rpc.answered(e) || attempt > 0) {
+                if (FogCommunication.answered(e) || attempt > 0) {
                     throw e;
                 }
                 failed(l.node(), e);
@@ -409,35 +409,35 @@ final class ChordNode {
             r.add("successor", FogApp.JSON.toJsonTree(successor()));
             r.add("successors", FogApp.JSON.toJsonTree(successors()));
             r.add("predecessor", FogApp.JSON.toJsonTree(predecessor));
-            Rpc.respond(ex, 200, r);
+            FogCommunication.respond(ex, 200, r);
         });
         http.createContext("/chord/closest", ex -> {
-            int key = JsonParser.parseString(Rpc.body(ex)).getAsJsonObject().get("key").getAsInt();
+            int key = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject().get("key").getAsInt();
             JsonObject r = new JsonObject();
             r.add("closest", FogApp.JSON.toJsonTree(closestPreceding(key)));
             r.add("successor", FogApp.JSON.toJsonTree(successor()));
-            Rpc.respond(ex, 200, r);
+            FogCommunication.respond(ex, 200, r);
         });
         http.createContext("/chord/notify", ex -> {
-            NodeRef p = FogApp.JSON.fromJson(Rpc.body(ex), NodeRef.class);
+            NodeRef p = FogApp.JSON.fromJson(FogCommunication.body(ex), NodeRef.class);
             onNotify(p);
-            Rpc.respond(ex, 200, null);
+            FogCommunication.respond(ex, 200, null);
         });
         http.createContext("/dht/put", ex -> {
-            JsonObject b = JsonParser.parseString(Rpc.body(ex)).getAsJsonObject();
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             data.put(b.get("key").getAsString(), b.get("value"));
-            Rpc.respond(ex, 200, null);
+            FogCommunication.respond(ex, 200, null);
         });
         http.createContext("/dht/get", ex -> {
             String q = ex.getRequestURI().getRawQuery();
             String key = q == null ? "" : URLDecoder.decode(q.replaceFirst("^key=", ""), StandardCharsets.UTF_8);
             JsonElement v = data.get(key);
-            Rpc.respond(ex, v == null ? 404 : 200, v);
+            FogCommunication.respond(ex, v == null ? 404 : 200, v);
         });
         http.createContext("/dht/bulk", ex -> {
-            JsonObject b = JsonParser.parseString(Rpc.body(ex)).getAsJsonObject();
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             b.getAsJsonObject("entries").entrySet().forEach(e -> data.put(e.getKey(), e.getValue()));
-            Rpc.respond(ex, 200, null);
+            FogCommunication.respond(ex, 200, null);
         });
     }
 
@@ -463,7 +463,7 @@ final class ChordNode {
             if (!remove.isEmpty()) {
                 JsonObject body = new JsonObject();
                 body.add("entries", moved);
-                Rpc.postAsync(p.http + "/dht/bulk", body);
+                FogCommunication.postAsync(p.http + "/dht/bulk", body);
                 remove.forEach(data::remove);
             }
         }
