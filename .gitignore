@@ -1,0 +1,17 @@
+# Raw dataset
+YJMob100K/*.csv
+YJMob100K/*.csv.gz
+YJMob100K/*.pdf
+# Outputs and generated data
+data/
+# Java
+target/
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+# IDEs / macOS
+.idea/
+.vscode/
+*.iml
+.DS_Store

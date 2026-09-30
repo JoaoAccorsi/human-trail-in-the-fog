@@ -1,0 +1,4 @@
+streamlit>=1.54   # web interface (>=1.54: security fixes)
+pandas>=2.2
+matplotlib>=3.8
+requests>=2.33    # TMS queries (>=2.33: security fixes)
