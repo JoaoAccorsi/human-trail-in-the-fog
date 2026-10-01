@@ -1,6 +1,8 @@
 package fog;
 
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,26 +50,83 @@ public class FogApp {
         Thread.currentThread().join(); // runs until Ctrl+C
     }
 
-    /** Waits for the Chord ring to close: following successors from the seed, it visits every node and returns. */
+    /**
+     * Waits until the Chord ring is stable before telling the user to start the Edge:
+     *  1. following successors from the seed visits every node and returns to it;
+     *  2. every node's predecessor is the node before it on the ring;
+     *  3. every finger table matches finger[i] = successor(id + 2^i);
+     *  4. the address record "fog:{id}" of every node can be read from the ring.
+     */
     private static void awaitRing(List<FogNode> nodes) throws InterruptedException {
         Map<Integer, FogNode> byId = new HashMap<>();
         nodes.forEach(n -> byId.put(n.ref.id, n));
+        List<Integer> sortedIds = new ArrayList<>(byId.keySet());
+        Collections.sort(sortedIds);
         FogNode first = nodes.get(0);
-        for (int s = 0; s < 60; s++) {
+        String missing = "";
+        for (int s = 1; s <= 120; s++) {
             Thread.sleep(1000);
-            List<Integer> order = new ArrayList<>();
-            FogNode current = first;
-            do {
-                order.add(current.id);
-                current = byId.get(current.chord.successor().id);
-            } while (current != null && current != first && order.size() <= nodes.size());
-            if (current == first && order.size() == nodes.size() && s >= 4) {   // +seconds for the finger tables
-                System.out.printf("[Fog   ] Chord ring ready with %d nodes (ring order: %s)%n", nodes.size(), order);
+            missing = ringProblem(nodes, byId, sortedIds, first);
+            if (missing == null) {
+                System.out.printf("[Fog   ] Chord ring ready with %d nodes after %d s: successors, predecessors, "
+                        + "finger tables and fog:{id} records consistent%n", nodes.size(), s);
                 System.out.println("[Fog   ] you can run the Edge now.");
                 return;
             }
+            if (s % 10 == 0) {
+                System.out.printf("[Fog   ] waiting for the Chord ring to stabilize (%s)...%n", missing);
+            }
         }
-        System.out.println("[Fog   ] warning: the Chord ring has not stabilized yet; the nodes keep trying.");
+        System.out.printf("[Fog   ] warning: the Chord ring has not stabilized yet (%s); the nodes keep trying.%n", missing);
+    }
+
+    /** null if the ring is stable; otherwise a short description of what is not ready yet. */
+    private static String ringProblem(List<FogNode> nodes, Map<Integer, FogNode> byId,
+                                      List<Integer> sortedIds, FogNode first) {
+        List<Integer> order = new ArrayList<>();
+        FogNode current = first;
+        do {
+            order.add(current.ref.id);
+            current = byId.get(current.chord.successor().id);
+        } while (current != null && current != first && order.size() <= nodes.size());
+        if (current != first || order.size() != nodes.size()) {
+            return "ring not closed through all successors";
+        }
+        for (FogNode n : nodes) {
+            NodeRef p = n.chord.predecessor();
+            int expected = sortedIds.get(Math.floorMod(sortedIds.indexOf(n.ref.id) - 1, sortedIds.size()));
+            if (p == null || p.id != expected) {
+                return "predecessor of Fog " + n.id + " not set";
+            }
+            List<NodeRef> fingers = n.chord.fingers();
+            for (int i = 0; i < fingers.size(); i++) {
+                int target = (n.ref.id + (1 << i)) % ChordNode.RING;
+                NodeRef f = fingers.get(i);
+                if (f == null || f.id != successorOf(target, sortedIds)) {
+                    return "finger table of Fog " + n.id + " not converged";
+                }
+            }
+        }
+        for (FogNode n : nodes) {
+            try {
+                if (first.chord.get("fog:" + n.id).value() == null) {
+                    return "address of Fog " + n.id + " not on the ring yet";
+                }
+            } catch (IOException e) {
+                return "lookup of fog:" + n.id + " failed";
+            }
+        }
+        return null;
+    }
+
+    /** First node id equal to or after the key on the ring. */
+    private static int successorOf(int key, List<Integer> sortedIds) {
+        for (int id : sortedIds) {
+            if (id >= key) {
+                return id;
+            }
+        }
+        return sortedIds.get(0);
     }
 
     /** HTF_FOG_IDS: "7", "1,2,3", "5-8" or empty (= all). The seed node starts first. */

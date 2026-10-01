@@ -40,11 +40,20 @@ import com.sun.net.httpserver.HttpServer;
  *   B -> A  POST /handover/commit                  A closes the visit and sends it to the TMS
  *   Pings that still reach A in the meantime are relayed to B (POST /handover/ping).
  *
+ * Single owner per user (OIDA record "h:{h}" on the Chord ring):
+ *   - a Fog that does not serve the user redirects it to the Fog that owns the record,
+ *     and only falls back to the Fog of the cell when the user has no owner;
+ *   - ownership is taken with a conditional write (ChordNode.claim): the Fog with the
+ *     most recent ping wins. A Fog that loses closes its visit and drops the context; a
+ *     Fog that wins over an unexpected owner tells it to do so (POST /handover/release);
+ *   - a stale open visit is never extended: it is closed before a new stay starts.
+ *
  * Handover API:
  *   POST /handover/prepare  {Context}         -> 200
  *   POST /handover/ping     {Ping}            -> 202 (relayed ping)
  *   POST /handover/commit   {h, nextFog}      -> 202
  *   POST /handover/transfer {h, nextFog}      -> 200 {Context} | 404  (user reappeared in another Fog)
+ *   POST /handover/release  {h, nextFog}      -> 202  (another Fog now owns the user: close and drop)
  *   GET  /status                              -> node and ring state
  *   POST /admin/crash                         -> simulates a crash of this node (for failure tests)
  */
@@ -202,16 +211,31 @@ final class FogNode {
         }
     }
 
-    /** New user in this Fog, inside the area. If it had a context in another Fog, look it up on the ring. */
+    /**
+     * New user in this Fog, inside the area. If another Fog owns the user's record on the ring:
+     *  - a ping older than that record arrived late (e.g. relayed by the entry node): it is
+     *    forwarded to the owner, which drops it if it already has a more recent one;
+     *  - otherwise the context is pulled from the owner, which closes its visit.
+     */
     private void attach(Ping p) {
         Context ctx = null;
+        Integer pulledFrom = null;
         try {
             ChordNode.Value v = chord.get("h:" + p.h);
-            if (v.value() != null) {
-                int owner = v.value().getAsJsonObject().get("fog").getAsInt();
+            int owner = fogOf(v.value());
+            if (owner > 0 && owner != id) {
                 log("OIDA: context of %s... is at Fog %d (ring lookup: %d hops)", brief(p.h), owner, v.hops());
-                if (owner != id) {
-                    ctx = pullContext(owner, p.h);
+                if (p.seq < seqOf(v.value())) {
+                    NodeRef o = resolveFog(owner);
+                    if (o != null) {
+                        log("ping %s of %s... is older than Fog %d's record -> forwarded to it", p.time, brief(p.h), owner);
+                        relay(o, p);
+                        return;
+                    }
+                }
+                ctx = pullContext(owner, p.h);
+                if (ctx != null) {
+                    pulledFrom = owner;
                 }
             }
         } catch (IOException e) {
@@ -226,13 +250,24 @@ final class FogNode {
             log("user %s... attached with the recovered context", brief(p.h));
         }
         ctx.origin = ref;
+        closeStaleVisit(p.h);
         contexts.put(p.h, ctx);
-        registerOwner(p.h);
         record(p, ctx);
+        claimOwnership(p.h, ctx, pulledFrom);
     }
 
     /** User this Fog does not serve and outside its area: points the Edge to the right Fog. */
     private void redirect(Ping p) {
+        Integer owner = ownerOf(p.h);
+        if (owner != null && owner != id) {             // the user already has a serving Fog: send it there
+            NodeRef o = resolveFog(owner);
+            if (o != null) {
+                log("user %s... is served by Fog %d -> redirected to it", brief(p.h), owner);
+                commandEdge(p.h, o);
+                relay(o, p);
+                return;
+            }
+        }
         int target = Grid.fogOfCell(p.x, p.y);
         NodeRef b = resolveFog(target);
         if (b == null) {
@@ -278,12 +313,13 @@ final class FogNode {
         Ping trigger = ctx.triggerPing;
         ctx.triggerPing = null;
         ctx.origin = ref;
+        closeStaleVisit(h);
         contexts.put(h, ctx);
         log("user %s... arrived; taking over (handover #%d, from Fog %d)", brief(h), ctx.handovers, origin.fogId);
         if (trigger != null) {
             record(trigger, ctx);
         }
-        registerOwner(h);
+        claimOwnership(h, ctx, origin.fogId);
         JsonObject commit = new JsonObject();
         commit.addProperty("h", h);
         commit.addProperty("nextFog", id);
@@ -321,7 +357,10 @@ final class FogNode {
 
     private void endDay(String h) {
         Visit v = openVisits.remove(h);
-        contexts.remove(h);
+        Context ctx = contexts.remove(h);
+        if (ctx != null) {
+            releaseOwnership(h, ctx.lastSeq);
+        }
         if (v != null) {
             v.reason = "end_of_day";
             log("end of day | visit %s-%s (%d pings) -> TMS", v.arrival, v.departure, v.pings);
@@ -389,14 +428,90 @@ final class FogNode {
         }
     }
 
-    private void registerOwner(String h) {
+    /** Fog that owns the user's record on the ring, or null (no record, released or lookup failed). */
+    private Integer ownerOf(String h) {
         try {
-            JsonObject v = new JsonObject();
-            v.addProperty("fog", id);
-            chord.put("h:" + h, v);
+            ChordNode.Value v = chord.get("h:" + h);
+            int fog = fogOf(v.value());
+            return fog > 0 ? fog : null;
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Takes ownership of the user on the ring. The record with the most recent ping wins:
+     *  - if another Fog holds a more recent record, this Fog closes its visit and drops the context;
+     *  - if this Fog won over an owner other than the expected one (the origin of a handover),
+     *    that owner is told to close its visit and drop the context (two owners never coexist).
+     */
+    private void claimOwnership(String h, Context ctx, Integer expectedPrevious) {
+        JsonObject record = new JsonObject();
+        record.addProperty("fog", id);
+        record.addProperty("seq", ctx.lastSeq);
+        ChordNode.Claim c;
+        try {
+            c = chord.claim("h:" + h, record);
         } catch (IOException e) {
             log("OIDA: failed to register the owner of %s... (%s)", brief(h), e.getMessage());
+            return;
         }
+        int winner = fogOf(c.stored());
+        int previous = fogOf(c.previous());
+        if (winner != id) {
+            log("OIDA: Fog %d holds a more recent context of %s...; releasing mine", winner, brief(h));
+            handOverContext(h, winner);
+            return;
+        }
+        if (previous > 0 && previous != id && (expectedPrevious == null || previous != expectedPrevious)) {
+            NodeRef old = resolveFog(previous);
+            if (old != null) {
+                log("OIDA: %s... was still registered at Fog %d; telling it to release the user", brief(h), previous);
+                JsonObject body = new JsonObject();
+                body.addProperty("h", h);
+                body.addProperty("nextFog", id);
+                FogCommunication.postAsync(old.http + "/handover/release", body);
+            }
+        }
+    }
+
+    /** End of the day: the record stays on the ring, but marked as released (fog 0). */
+    private void releaseOwnership(String h, int lastSeq) {
+        JsonObject record = new JsonObject();
+        record.addProperty("fog", 0);
+        record.addProperty("seq", lastSeq);
+        try {
+            ChordNode.Claim c = chord.claim("h:" + h, record);
+            if (fogOf(c.stored()) != 0) {
+                log("OIDA: record of %s... already belongs to Fog %d; left unchanged", brief(h), fogOf(c.stored()));
+            }
+        } catch (IOException e) {
+            log("OIDA: failed to release %s... (%s)", brief(h), e.getMessage());
+        }
+    }
+
+    /** A visit still open for a user this Fog no longer serves is closed, never extended. */
+    private void closeStaleVisit(String h) {
+        Visit v = openVisits.remove(h);
+        if (v != null) {
+            v.reason = "context_lost";
+            log("stale visit %s-%s of %s... closed before the new stay -> TMS", v.arrival, v.departure, brief(h));
+            tms.send(v);
+        }
+    }
+
+    private static long seqOf(JsonElement record) {
+        if (record != null && record.isJsonObject() && record.getAsJsonObject().has("seq")) {
+            return record.getAsJsonObject().get("seq").getAsLong();
+        }
+        return Long.MIN_VALUE;
+    }
+
+    private static int fogOf(JsonElement record) {
+        if (record != null && record.isJsonObject() && record.getAsJsonObject().has("fog")) {
+            return record.getAsJsonObject().get("fog").getAsInt();
+        }
+        return 0;
     }
 
     private Context pullContext(int owner, String h) {
@@ -471,6 +586,18 @@ final class FogNode {
             } catch (Exception e) {
                 FogCommunication.respond(ex, 500, null);
             }
+        });
+        http.createContext("/handover/release", ex -> {
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
+            String h = b.get("h").getAsString();
+            int nextFog = b.get("nextFog").getAsInt();
+            logic.execute(() -> safely(() -> {
+                if (contexts.containsKey(h) || openVisits.containsKey(h)) {
+                    log("Fog %d now owns %s...; closing my visit and dropping the context", nextFog, brief(h));
+                    handOverContext(h, nextFog);
+                }
+            }));
+            FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/status", ex -> {
             JsonObject r = new JsonObject();

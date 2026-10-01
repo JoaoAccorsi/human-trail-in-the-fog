@@ -8,6 +8,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,13 +45,16 @@ import com.sun.net.httpserver.HttpServer;
  *
  * Records stored on the ring:
  *   "fog:{id}" -> Fog node address (NodeRef)       node discovery
- *   "h:{pseudonym}" -> {"fog": id}                 which Fog holds the user's context
+ *   "h:{pseudonym}" -> {"fog": id, "seq": n}       which Fog holds the user's context
+ *                                                  (written with claim: the record with the
+ *                                                  most recent ping wins; fog 0 = released)
  *
  * HTTP API (on the node's server):
  *   GET  /chord/info                 {self, successor, successors, predecessor}
  *   POST /chord/closest {key}        {closest, successor}   (one lookup step)
  *   POST /chord/notify  {NodeRef}    "am I your predecessor?"
  *   POST /dht/put       {key, value}
+ *   POST /dht/claim     {key, value}  -> {previous, stored}   keeps the value with the highest "seq"
  *   GET  /dht/get?key=...            value or 404
  *   POST /dht/bulk      {entries}    keys migrated when a new node joins
  */
@@ -379,6 +383,58 @@ final class ChordNode {
         }
     }
 
+    /** Result of a claim: the record that was stored before and the one stored now (the winner). */
+    record Claim(JsonElement previous, JsonElement stored) {
+    }
+
+    /**
+     * Conditional put for ownership records: the storing node keeps the value with the highest
+     * "seq" (ties: the new value wins) and answers with the previous and the current record.
+     * The comparison runs on the node that stores the key, so two Fogs claiming the same user
+     * at the same time always agree on a single winner.
+     */
+    Claim claim(String key, JsonObject value) throws IOException {
+        for (int attempt = 0; ; attempt++) {
+            Lookup l = findSuccessor(hash(key));
+            if (l.node().equals(self)) {
+                return keepNewest(key, value);
+            }
+            JsonObject body = new JsonObject();
+            body.addProperty("key", key);
+            body.add("value", value);
+            try {
+                JsonObject r = FogCommunication.post(l.node().http + "/dht/claim", body, TIMEOUT).getAsJsonObject();
+                return new Claim(r.get("previous"), r.get("stored"));
+            } catch (IOException e) {
+                if (FogCommunication.answered(e) || attempt > 0) {
+                    throw e;
+                }
+                failed(l.node(), e);
+            }
+        }
+    }
+
+    private Claim keepNewest(String key, JsonObject value) {
+        JsonElement[] previous = new JsonElement[1];
+        JsonElement stored = data.compute(key, (k, old) -> {
+            previous[0] = old;
+            return old == null || released(old) || seqOf(old) <= seqOf(value) ? value : old;
+        });
+        return new Claim(previous[0], stored);
+    }
+
+    /** A released ownership record (fog 0, end of the day) never blocks a new owner. */
+    private static boolean released(JsonElement e) {
+        return e.isJsonObject() && e.getAsJsonObject().has("fog") && e.getAsJsonObject().get("fog").getAsInt() == 0;
+    }
+
+    private static long seqOf(JsonElement e) {
+        if (e != null && e.isJsonObject() && e.getAsJsonObject().has("seq")) {
+            return e.getAsJsonObject().get("seq").getAsLong();
+        }
+        return Long.MIN_VALUE;
+    }
+
     Value get(String key) throws IOException {
         for (int attempt = 0; ; attempt++) {
             Lookup l = findSuccessor(hash(key));
@@ -428,6 +484,14 @@ final class ChordNode {
             data.put(b.get("key").getAsString(), b.get("value"));
             FogCommunication.respond(ex, 200, null);
         });
+        http.createContext("/dht/claim", ex -> {
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
+            Claim c = keepNewest(b.get("key").getAsString(), b.getAsJsonObject("value"));
+            JsonObject r = new JsonObject();
+            r.add("previous", c.previous());
+            r.add("stored", c.stored());
+            FogCommunication.respond(ex, 200, r);
+        });
         http.createContext("/dht/get", ex -> {
             String q = ex.getRequestURI().getRawQuery();
             String key = q == null ? "" : URLDecoder.decode(q.replaceFirst("^key=", ""), StandardCharsets.UTF_8);
@@ -467,6 +531,11 @@ final class ChordNode {
                 remove.forEach(data::remove);
             }
         }
+    }
+
+    /** Copy of the finger table (used to check that the ring has converged). */
+    List<NodeRef> fingers() {
+        return Arrays.asList(fingers.clone());
     }
 
     JsonObject state() {

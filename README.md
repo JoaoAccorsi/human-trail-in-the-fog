@@ -110,6 +110,19 @@ thread, so the state needs no locks; HTTP handlers only enqueue work or answer f
 If a user reappears in another node without a handover (e.g. after hours offline), that node looks
 up `h:{h}` on the ring and pulls the context from the node holding it (`/handover/transfer`).
 
+**A single owner per user.** The `h:{h}` record also stores the `seq` of the owner's most recent
+ping and is written with a conditional put (`/dht/claim`): the node that stores the key keeps the
+record with the most recent ping, so two nodes claiming the same user always agree on one winner.
+
+- A node that does not serve the user (e.g. the entry node) redirects it to the **owner** of the
+  record, and only falls back to the node of the cell when the user has no owner.
+- A node that loses a claim closes its visit and drops the context; a node that wins over an
+  unexpected owner tells it to do the same (`/handover/release`).
+- A ping older than the owner's record (a late relay) is forwarded to the owner instead of
+  starting a new stay, and an open visit is never extended after the node lost the user: it is
+  closed (`context_lost`) before a new stay starts.
+- At the end of the day the record is released (`fog = 0`).
+
 ### Handover decision (RSRP + Kalman + TTT)
 
 YJMob100K has no radio measurements, so the serving node computes a **synthetic RSRP** for each
@@ -206,10 +219,12 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `POST` | `/chord/closest` | One lookup step: closest node to the key in the finger table |
 | `POST` | `/chord/notify` | "May I be your predecessor?" (ring stabilization) |
 | `POST` / `GET` | `/dht/put` · `/dht/get?key=` · `/dht/bulk` | Store, read and migrate ring records |
+| `POST` | `/dht/claim` | Conditional put of an ownership record: the most recent ping wins |
 | `POST` | `/handover/prepare` | Node A hands the user's context to node B before the user arrives |
 | `POST` | `/handover/ping` | Relay of a ping that still reached the old node (or the entry node) |
 | `POST` | `/handover/commit` | Node B reports that the user arrived; node A closes its visit |
 | `POST` | `/handover/transfer` | A node asks for the context of a user who reappeared there |
+| `POST` | `/handover/release` | Another node now owns the user: close the visit and drop the context |
 | `GET` | `/status` | Successor list, predecessor and finger table (debugging) |
 | `POST` | `/admin/crash` | Simulates a crash (stops broker, API and timers without warning anyone) |
 
@@ -256,7 +271,7 @@ From the project root, one terminal per service, **in this order**:
 
 ```bash
 cd cloud/tms && mvn -q compile exec:exec     # 1. TMS: wait for "[TMS] listening on http://localhost:8080"
-cd fog && mvn -q compile exec:exec           # 2. the 16 Fog nodes: wait for "Chord ring ready with 16 nodes"
+cd fog && mvn -q compile exec:exec           # 2. the 16 Fog nodes: wait for "you can run the Edge now"
 cd edge && mvn -q compile exec:exec          # 3. Edge: replays the user/day and exits
 source ~/.venvs/htf/bin/activate
 cd cloud/mobility-platform && streamlit run mobility_platform.py   # 4. platform: http://localhost:8501
