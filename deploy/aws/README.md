@@ -4,16 +4,7 @@ Deploys the prototype with **one EC2 instance per node**: 16 Fog nodes, the TMS,
 Cloud Mobility Platform and one Edge simulator per user (2 by default). Every instance
 runs a single Docker container pulled from Amazon ECR.
 
-```
-                     your browser (allowed_cidr only)
-                                 │ :8501
-┌──────────────────────── VPC 10.20.0.0/16 · public subnet 10.20.1.0/24 ───────────────────────┐
-│  htf-cmp 10.20.1.6 ──GET──► htf-tms 10.20.1.5 ◄──POST /capture── htf-fog-1..16 10.20.1.11-26 │
-│                                                                   ▲  Chord ring + handover   │
-│  htf-edge-4000 10.20.1.40, htf-edge-4005 10.20.1.41 ──MQTT :190N──┘  (HTTP :900N, P2P)       │
-└──────────────────────────────────────────────────────────────────────────────────────────────┘
-        ECR (htf/fog, htf/tms, htf/cmp, htf/edge) · CloudWatch Logs (/htf) · SSM (no SSH)
-```
+![HTF on AWS](../../docs/img/aws-deployment.png)
 
 | HTF component | AWS resource |
 |---|---|

@@ -234,7 +234,7 @@ Every query re-reads the JSONL files, so data from previous runs shows up withou
 
 | Tool | Check | Install (macOS, Apple Silicon) |
 |---|---|---|
-| JDK 17+ | `java -version` | `brew install openjdk@21` |
+| JDK 21 | `java -version` | `brew install openjdk@21` |
 | Maven | `mvn -v` | `brew install maven` |
 | Python 3.11+ | `python3 --version` | `brew install python` |
 
@@ -362,6 +362,9 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 - **AWS, one EC2 instance per node** (16 Fog nodes, TMS, platform and 2 Edges), created with
   Terraform — see [deploy/aws/README.md](deploy/aws/README.md). `deploy/aws/up.sh` creates everything,
   `deploy/aws/crash-fog.sh N` simulates a node failure and `deploy/aws/down.sh` destroys everything.
+
+![HTF on AWS](docs/img/aws-deployment.png)
+<sub>The AWS environment created by `deploy/aws/up.sh`: one EC2 instance (one container) per node, fixed private IPs, a single security group, images in ECR, logs in CloudWatch and commands through SSM.</sub>
 
 | Variable | Component | Meaning (default) |
 |---|---|---|
