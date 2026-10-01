@@ -231,6 +231,8 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `POST` | `/handover/transfer` | A node asks for the context of a user who reappeared there |
 | `POST` | `/handover/release` | Another node now owns the user: close the visit and drop the context |
 | `POST` | `/handover/cancel` | The origin aborted the handover (no COMMIT in time): drop the PREPARE |
+| `POST` | `/ring/changed` | Keys `(from, to]` were lost with a failed node: republish the owner records in that range |
+| `POST` | `/dht/claims` | Conditional put of many ownership records stored on this node (one request per node) |
 | `GET` | `/status` | Successor list, predecessor and finger table (debugging) |
 | `POST` | `/admin/crash` | Simulates a crash (stops broker, API and timers without warning anyone) |
 
@@ -354,8 +356,21 @@ sequenceDiagram
     F15->>F15: predecessor = Fog 6 — ring repaired
 ```
 
-Not recovered in this version: the `h:{pseudonym}` records stored only on the failed node (keys are
-not replicated), the contexts and open visits in its memory, and the Edges connected to its broker.
+**Owner records after a failure.** The `h:{pseudonym}` records stored on the failed node are lost
+with it, but they come back. The predecessor of the failed node knows exactly which keys were
+there, the range (predecessor, failed node], and announces that range to all the nodes
+(`/ring/changed`). Every node then republishes **only** the records of its users whose key falls in
+that range, 1 to 3 s later (random jitter, so the nodes do not write at the same instant), on a
+background thread (pings and handovers never wait), with one request per responsible node
+(`/dht/claims`). The conditional write recreates the lost records on the node that inherited the
+keys and never overwrites a more recent owner. A full republication also runs every
+`HTF_OWNER_REFRESH_MS` (5 min) as a safety net.
+
+Cost per failure, for U users and N nodes: about U/N records rewritten (the lost ones), instead of
+all U. With 1,000,000 users and 1,000 nodes: ~1,000 writes, about one per node.
+
+Not recovered in this version: the contexts and open visits in the failed node's memory. Its Edges
+go back to the entry broker and are taken over by the node of their cell.
 Visits already sent to the TMS are safe.
 
 ### Stopping and useful commands
@@ -393,6 +408,7 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_FOG_IDS`, `HTF_FOG_HOST`, `HTF_FOG_SEED` | Fog | Nodes to start (all), advertised host (`localhost`), seed URL (`http://localhost:9001`) |
 | `HTF_TMS_URL` | Fog, platform | TMS address (`http://localhost:8080`) |
 | `HTF_HANDOVER`, `HTF_HOM_DB`, `HTF_TTT_MIN` | Fog | Handover policy (`rsrp`), HOM (3 dB), TTT (60 min) |
+| `HTF_OWNER_REFRESH_MS`, `HTF_OWNER_REFRESH_JITTER_MS` | Fog | Full republication of the owner records (300000 ms); random extra wait after a failure (2000 ms) |
 | `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
 | `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`data`) |
 | `HTF_USER`, `HTF_DAY`, `HTF_DATASET` | Edge | Simulated user (4005), day (20), dataset CSV |
@@ -411,7 +427,8 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 - All devices share one salt and the pseudonym is fixed; a real deployment would give each device
   only its own `h` (or a per-person secret), rotate pseudonyms daily and authenticate devices on the
   brokers (MQTT over TLS).
-- Ring records are not replicated, and the Fog nodes are organized in a single level (regional Fog
+- Ring records are not replicated: a record lost with a failed node is unavailable until its owner
+  republishes it (about 1 s after the failure is detected). The Fog nodes are organized in a single level (regional Fog
   nodes are future work).
 - The embedded broker is Moquette 0.17, the latest release on Maven Central; the fix for
   CVE-2026-85724 (0.18.x) is only published on GitHub.

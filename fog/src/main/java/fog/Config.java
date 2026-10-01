@@ -41,6 +41,18 @@ public final class Config {
     public static final int FAILURE_TIMEOUT_MS = 1500;
     /** A "fog:{id}" record not refreshed for this long is treated as a Fog that is down. */
     public static final int ADDRESS_TTL_MS = 10_000;
+    /**
+     * Owner records "h:{pseudonym}" after failures. When a node goes down, every node republishes
+     * only the records of its users whose key was stored on the failed node (the lost range),
+     * OWNER_REFRESH_DELAY_MS plus a random 0..OWNER_REFRESH_JITTER_MS later (so the nodes do not
+     * all write at the same instant). As a safety net, all records are republished every
+     * OWNER_REFRESH_MS. The writes run off the node's logic thread, grouped by responsible node.
+     */
+    public static final int OWNER_REFRESH_MS = Integer.parseInt(env("HTF_OWNER_REFRESH_MS", "300000"));
+    /** Wait after a ring change before republishing (lets the ring repair its successors first). */
+    public static final int OWNER_REFRESH_DELAY_MS = 1000;
+    /** Random extra wait (0..this) so that the nodes do not republish all at the same instant. */
+    public static final int OWNER_REFRESH_JITTER_MS = Integer.parseInt(env("HTF_OWNER_REFRESH_JITTER_MS", "2000"));
 
     // ------------------------------------------------------------------ handover decision
     /**

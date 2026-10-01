@@ -9,6 +9,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,6 +56,7 @@ import com.sun.net.httpserver.HttpServer;
  *   POST /chord/notify  {NodeRef}    "am I your predecessor?"
  *   POST /dht/put       {key, value}
  *   POST /dht/claim     {key, value}  -> {previous, stored}   keeps the value with the highest "seq"
+ *   POST /dht/claims    {entries}     -> {results}            the same, for many keys of this node
  *   GET  /dht/get?key=...            value or 404
  *   POST /dht/bulk      {entries}    keys migrated when a new node joins
  */
@@ -90,6 +92,8 @@ final class ChordNode {
     private int nextFinger = 0;
     private final Map<String, JsonElement> data = new ConcurrentHashMap<>();
     private final Consumer<String> log;
+    /** Called with the keys (from, to] that were stored on a node found down (only by its predecessor). */
+    private volatile Consumer<Range> ringChanged = r -> { };
     /** Consecutive timeouts per node id (a refused connection counts as down at once). */
     private final Map<Integer, Integer> strikes = new ConcurrentHashMap<>();
     /** Set when the predecessor was found down, so its replacement is logged. */
@@ -280,6 +284,26 @@ final class ChordNode {
         if (wasPredecessor) {
             log.accept(String.format("Chord: predecessor %s is down -> waiting for a new one to notify", dead));
         }
+        if (wasSuccessor) {
+            // this node preceded the failed one: the keys it stored were exactly (self, dead]
+            ringChanged.accept(new Range(self.id, dead.id));
+        }
+    }
+
+    /** Ring interval of keys (from, to]. */
+    record Range(int from, int to) {
+        boolean contains(int key) {
+            return betweenInclusive(key, from, to);
+        }
+    }
+
+    /**
+     * Registers what to do when this node finds its successor down (must not block: it runs
+     * inside the Chord tasks). Only the predecessor of the failed node reports it, with the exact
+     * range of keys that were stored there.
+     */
+    void onRingChange(Consumer<Range> r) {
+        ringChanged = r;
     }
 
     private void setSuccessors(List<NodeRef> list) {
@@ -414,6 +438,60 @@ final class ChordNode {
         }
     }
 
+    /**
+     * Conditional put of many records, grouped by responsible node: the keys are sorted by hash,
+     * and after one lookup every following key up to the responsible node's id goes to the same
+     * node, in a single request (POST /dht/claims). Keys that could not be written are left out
+     * of the result (the next refresh retries them).
+     */
+    Map<String, Claim> claimAll(Map<String, JsonObject> records) {
+        List<String> keys = new ArrayList<>(records.keySet());
+        keys.sort((a, b) -> Integer.compare(hash(a), hash(b)));
+        Map<String, Claim> out = new HashMap<>();
+        int i = 0;
+        while (i < keys.size()) {
+            int first = hash(keys.get(i));
+            Lookup l;
+            try {
+                l = findSuccessor(first);
+            } catch (IOException e) {
+                i++;
+                continue;
+            }
+            NodeRef node = l.node();
+            int j = i + 1;
+            while (j < keys.size() && (hash(keys.get(j)) == first
+                    || (first != node.id && betweenInclusive(hash(keys.get(j)), first, node.id)))) {
+                j++;
+            }
+            List<String> group = keys.subList(i, j);
+            if (node.equals(self)) {
+                group.forEach(k -> out.put(k, keepNewest(k, records.get(k))));
+            } else {
+                JsonArray entries = new JsonArray();
+                for (String k : group) {
+                    JsonObject e = new JsonObject();
+                    e.addProperty("key", k);
+                    e.add("value", records.get(k));
+                    entries.add(e);
+                }
+                JsonObject body = new JsonObject();
+                body.add("entries", entries);
+                try {
+                    JsonObject r = FogCommunication.post(node.http + "/dht/claims", body, TIMEOUT).getAsJsonObject();
+                    for (JsonElement x : r.getAsJsonArray("results")) {
+                        JsonObject o = x.getAsJsonObject();
+                        out.put(o.get("key").getAsString(), new Claim(o.get("previous"), o.get("stored")));
+                    }
+                } catch (IOException e) {
+                    failed(node, e);                 // the next refresh looks the keys up again
+                }
+            }
+            i = j;
+        }
+        return out;
+    }
+
     private Claim keepNewest(String key, JsonObject value) {
         JsonElement[] previous = new JsonElement[1];
         JsonElement stored = data.compute(key, (k, old) -> {
@@ -490,6 +568,23 @@ final class ChordNode {
             JsonObject r = new JsonObject();
             r.add("previous", c.previous());
             r.add("stored", c.stored());
+            FogCommunication.respond(ex, 200, r);
+        });
+        http.createContext("/dht/claims", ex -> {
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
+            JsonArray results = new JsonArray();
+            for (JsonElement x : b.getAsJsonArray("entries")) {
+                JsonObject e = x.getAsJsonObject();
+                String key = e.get("key").getAsString();
+                Claim c = keepNewest(key, e.getAsJsonObject("value"));
+                JsonObject o = new JsonObject();
+                o.addProperty("key", key);
+                o.add("previous", c.previous());
+                o.add("stored", c.stored());
+                results.add(o);
+            }
+            JsonObject r = new JsonObject();
+            r.add("results", results);
             FogCommunication.respond(ex, 200, r);
         });
         http.createContext("/dht/get", ex -> {

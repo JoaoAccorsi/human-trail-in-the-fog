@@ -3,7 +3,9 @@ package fog;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -11,6 +13,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -49,7 +53,12 @@ import com.sun.net.httpserver.HttpServer;
  *   - ownership is taken with a conditional write (ChordNode.claim): the Fog with the
  *     most recent ping wins. A Fog that loses closes its visit and drops the context; a
  *     Fog that wins over an unexpected owner tells it to do so (POST /handover/release);
- *   - a stale open visit is never extended: it is closed before a new stay starts.
+ *   - a stale open visit is never extended: it is closed before a new stay starts;
+ *   - a record lost with a failed node comes back on the node that inherited its keys: the
+ *     predecessor of the failed node tells all the others the lost range of keys
+ *     (POST /ring/changed), and every node republishes only the records of its users that fall
+ *     in that range, after a random delay, off the logic thread and grouped by responsible
+ *     node. All records are also republished every OWNER_REFRESH_MS (safety net).
  *
  * Handover API:
  *   POST /handover/prepare  {Context}         -> 200
@@ -58,6 +67,7 @@ import com.sun.net.httpserver.HttpServer;
  *   POST /handover/transfer {h, nextFog}      -> 200 {Context} | 404  (user reappeared in another Fog)
  *   POST /handover/release  {h, nextFog}      -> 202  (another Fog now owns the user: close and drop)
  *   POST /handover/cancel   {h}               -> 202  (the origin aborted the handover: drop the PREPARE)
+ *   POST /ring/changed      {fog, from, to}   -> 202  (keys (from, to] were lost: republish mine there)
  *   GET  /status                              -> node and ring state
  *   POST /admin/crash                         -> simulates a crash of this node (for failure tests)
  */
@@ -83,6 +93,11 @@ final class FogNode {
     private final Map<String, Context> prepared = new ConcurrentHashMap<>();  // received via PREPARE
     private final Map<String, NodeRef> inHandover = new HashMap<>();          // h -> target Fog
     private final Map<Integer, NodeRef> addresses = new ConcurrentHashMap<>(); // cache of "fog:{id}"
+    private final AtomicBoolean refreshScheduled = new AtomicBoolean(false);
+    /** Lost key ranges waiting for the next targeted refresh (guarded by itself). */
+    private final List<ChordNode.Range> lostRanges = new ArrayList<>();
+    /** Owner-record writes and failure announcements: never on the logic thread. */
+    private final ExecutorService background = Executors.newSingleThreadExecutor();
 
     FogNode(int id) {
         this.id = id;
@@ -111,6 +126,12 @@ final class FogNode {
         timers.scheduleWithFixedDelay(chord::checkPredecessor, 600, 500, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(chord::fixFingers, 400, 150, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(this::publishAddress, 500, 3000, TimeUnit.MILLISECONDS);
+        timers.scheduleWithFixedDelay(() -> logic.execute(() -> safely(() -> refreshOwnership(null, null))),
+                Config.OWNER_REFRESH_MS, Config.OWNER_REFRESH_MS, TimeUnit.MILLISECONDS);
+        chord.onRingChange(range -> {
+            scheduleOwnerRefresh(range, "my successor went down");
+            background.execute(() -> safely(() -> announceRingChange(range)));
+        });
         timers.scheduleWithFixedDelay(() -> logic.execute(tms::resendPending), 5, 5, TimeUnit.SECONDS);
 
         mqtt = new MqttClient(ref.mqtt, "htf-fog-" + id, new MemoryPersistence());
@@ -178,6 +199,7 @@ final class FogNode {
             broker.stop();
         }
         logic.shutdownNow();
+        background.shutdownNow();
     }
 
     // =========================================================== logic ("logic" thread)
@@ -486,7 +508,7 @@ final class FogNode {
      *  - if this Fog won over an owner other than the expected one (the origin of a handover),
      *    that owner is told to close its visit and drop the context (two owners never coexist).
      */
-    private void claimOwnership(String h, Context ctx, Integer expectedPrevious) {
+    private ChordNode.Claim claimOwnership(String h, Context ctx, Integer expectedPrevious) {
         JsonObject record = new JsonObject();
         record.addProperty("fog", id);
         record.addProperty("seq", ctx.lastSeq);
@@ -495,14 +517,14 @@ final class FogNode {
             c = chord.claim("h:" + h, record);
         } catch (IOException e) {
             log("OIDA: failed to register the owner of %s... (%s)", brief(h), e.getMessage());
-            return;
+            return null;
         }
         int winner = fogOf(c.stored());
         int previous = fogOf(c.previous());
         if (winner != id) {
             log("OIDA: Fog %d holds a more recent context of %s...; releasing mine", winner, brief(h));
             handOverContext(h, winner);
-            return;
+            return c;
         }
         if (previous > 0 && previous != id && (expectedPrevious == null || previous != expectedPrevious)) {
             NodeRef old = resolveFog(previous);
@@ -514,6 +536,132 @@ final class FogNode {
                 FogCommunication.postAsync(old.http + "/handover/release", body);
             }
         }
+        return c;
+    }
+
+    // =========================================================== owner records after failures
+
+    /**
+     * Schedules a targeted refresh of the lost range, after OWNER_REFRESH_DELAY_MS plus a random
+     * jitter. Ranges reported while a refresh is pending are merged into it.
+     */
+    private void scheduleOwnerRefresh(ChordNode.Range range, String reason) {
+        synchronized (lostRanges) {
+            lostRanges.add(range);
+        }
+        if (refreshScheduled.compareAndSet(false, true)) {
+            long delay = Config.OWNER_REFRESH_DELAY_MS
+                    + ThreadLocalRandom.current().nextLong(Config.OWNER_REFRESH_JITTER_MS + 1L);
+            timers.schedule(() -> logic.execute(() -> safely(() -> {
+                refreshScheduled.set(false);
+                List<ChordNode.Range> ranges;
+                synchronized (lostRanges) {
+                    ranges = new ArrayList<>(lostRanges);
+                    lostRanges.clear();
+                }
+                refreshOwnership(ranges, reason);
+            })), delay, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /**
+     * Republishes "h:{h} -> this Fog" for the users served here (not those in a handover):
+     * only the keys inside the lost ranges, or all of them when ranges is null (periodic).
+     * Runs on the logic thread only to take a snapshot; the writes go to the background thread,
+     * grouped by responsible node, and their results come back to the logic thread.
+     * The conditional write never overwrites a more recent owner and recreates a lost record.
+     */
+    private void refreshOwnership(List<ChordNode.Range> ranges, String reason) {
+        Map<String, JsonObject> records = new HashMap<>();
+        for (Map.Entry<String, Context> e : contexts.entrySet()) {
+            String h = e.getKey();
+            if (inHandover.containsKey(h) || !inRanges(ChordNode.hash("h:" + h), ranges)) {
+                continue;
+            }
+            JsonObject record = new JsonObject();
+            record.addProperty("fog", id);
+            record.addProperty("seq", e.getValue().lastSeq);
+            records.put("h:" + h, record);
+        }
+        if (records.isEmpty()) {
+            if (reason != null) {
+                log("OIDA: ring change (%s): none of my %d user(s) had the record on the failed node",
+                        reason, contexts.size());
+            }
+            return;
+        }
+        background.execute(() -> safely(() -> {
+            Map<String, ChordNode.Claim> results = chord.claimAll(records);
+            logic.execute(() -> safely(() -> applyRefresh(records.size(), results, reason)));
+        }));
+    }
+
+    private static boolean inRanges(int key, List<ChordNode.Range> ranges) {
+        if (ranges == null) {
+            return true;
+        }
+        for (ChordNode.Range r : ranges) {
+            if (r.contains(key)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Logic thread: acts on the results of a refresh (lost ownership, stale owners, restored records). */
+    private void applyRefresh(int sent, Map<String, ChordNode.Claim> results, String reason) {
+        int restored = 0;
+        for (Map.Entry<String, ChordNode.Claim> e : results.entrySet()) {
+            String h = e.getKey().substring("h:".length());
+            int winner = fogOf(e.getValue().stored());
+            int previous = fogOf(e.getValue().previous());
+            if (winner != id) {
+                if (contexts.containsKey(h) && !inHandover.containsKey(h)) {
+                    log("OIDA: Fog %d holds a more recent context of %s...; releasing mine", winner, brief(h));
+                    handOverContext(h, winner);
+                }
+                continue;
+            }
+            if (previous != id) {
+                restored++;
+            }
+            if (previous > 0 && previous != id) {
+                NodeRef old = resolveFog(previous);
+                if (old != null) {
+                    JsonObject body = new JsonObject();
+                    body.addProperty("h", h);
+                    body.addProperty("nextFog", id);
+                    FogCommunication.postAsync(old.http + "/handover/release", body);
+                }
+            }
+        }
+        if (reason != null || restored > 0) {
+            log("OIDA: owner records republished (%s): %d sent, %d written, %d restored",
+                    reason == null ? "periodic refresh" : reason, sent, results.size(), restored);
+        }
+    }
+
+    /**
+     * Only the neighbors of a failed node notice the failure: its predecessor tells all the other
+     * nodes which range of keys was lost (background thread).
+     */
+    private void announceRingChange(ChordNode.Range range) {
+        JsonObject body = new JsonObject();
+        body.addProperty("fog", id);
+        body.addProperty("from", range.from());
+        body.addProperty("to", range.to());
+        int told = 0;
+        for (int other = 1; other <= Config.numberOfFogs(); other++) {
+            if (other == id) {
+                continue;
+            }
+            NodeRef r = resolveFog(other);
+            if (r != null) {
+                FogCommunication.postAsync(r.http + "/ring/changed", body);
+                told++;
+            }
+        }
+        log("OIDA: lost key range (%d, %d] announced to %d node(s)", range.from(), range.to(), told);
     }
 
     /** End of the day: the record stays on the ring, but marked as released (fog 0). */
@@ -630,6 +778,12 @@ final class FogNode {
             } catch (Exception e) {
                 FogCommunication.respond(ex, 500, null);
             }
+        });
+        http.createContext("/ring/changed", ex -> {
+            JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
+            ChordNode.Range range = new ChordNode.Range(b.get("from").getAsInt(), b.get("to").getAsInt());
+            scheduleOwnerRefresh(range, "Fog " + b.get("fog").getAsInt() + " reported a node down");
+            FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/handover/cancel", ex -> {
             String h = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject().get("h").getAsString();
