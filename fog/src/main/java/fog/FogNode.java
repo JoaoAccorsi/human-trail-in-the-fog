@@ -39,6 +39,9 @@ import com.sun.net.httpserver.HttpServer;
  *   Edge -> B  ping on B's broker                  B activates the context and continues the trail
  *   B -> A  POST /handover/commit                  A closes the visit and sends it to the TMS
  *   Pings that still reach A in the meantime are relayed to B (POST /handover/ping).
+ *   If B does not COMMIT within HANDOVER_TIMEOUT_MS, or a relay to B fails, A aborts the
+ *   handover: it cancels the PREPARE on B and keeps serving the user (the Edge, if it cannot
+ *   reach B, falls back to the entry broker, which redirects it to A, the owner on the ring).
  *
  * Single owner per user (OIDA record "h:{h}" on the Chord ring):
  *   - a Fog that does not serve the user redirects it to the Fog that owns the record,
@@ -54,6 +57,7 @@ import com.sun.net.httpserver.HttpServer;
  *   POST /handover/commit   {h, nextFog}      -> 202
  *   POST /handover/transfer {h, nextFog}      -> 200 {Context} | 404  (user reappeared in another Fog)
  *   POST /handover/release  {h, nextFog}      -> 202  (another Fog now owns the user: close and drop)
+ *   POST /handover/cancel   {h}               -> 202  (the origin aborted the handover: drop the PREPARE)
  *   GET  /status                              -> node and ring state
  *   POST /admin/crash                         -> simulates a crash of this node (for failure tests)
  */
@@ -68,7 +72,7 @@ final class FogNode {
     private LocalBroker broker;
     private HttpServer http;
     private MqttClient mqtt;
-    private final TmsClient tms = new TmsClient();
+    private final TmsClient tms;
 
     /** All node logic runs on this single thread: no concurrency on the state. */
     private final ExecutorService logic = Executors.newSingleThreadExecutor();
@@ -84,6 +88,7 @@ final class FogNode {
         this.id = id;
         this.ref = NodeRef.ofFog(id);
         this.chord = new ChordNode(ref, this::log);
+        this.tms = new TmsClient(id);
     }
 
     // =========================================================== startup
@@ -182,8 +187,10 @@ final class FogNode {
 
         NodeRef pendingTarget = inHandover.get(h);
         if (pendingTarget != null) {                  // make-before-break: still arriving here
-            relay(pendingTarget, p);
-            return;
+            if (relay(pendingTarget, p)) {
+                return;
+            }
+            abortHandover(h, pendingTarget, "relay to Fog " + pendingTarget.fogId + " failed");
         }
         if (prepared.containsKey(h)) {                // first ping after PREPARE: take over the user
             activateHandover(h);
@@ -264,8 +271,10 @@ final class FogNode {
             if (o != null) {
                 log("user %s... is served by Fog %d -> redirected to it", brief(p.h), owner);
                 commandEdge(p.h, o);
-                relay(o, p);
-                return;
+                if (relay(o, p)) {
+                    return;
+                }
+                log("Fog %d did not answer; redirecting by area instead", owner);
             }
         }
         int target = Grid.fogOfCell(p.x, p.y);
@@ -304,6 +313,38 @@ final class FogNode {
         inHandover.put(p.h, b);
         commandEdge(p.h, b);                                               // 2. Edge switches broker
         log("PREPARE accepted by Fog %d; Edge told to connect to %s", target, b.mqtt);
+        String h = p.h;
+        timers.schedule(() -> logic.execute(() -> safely(() -> {
+            if (b.equals(inHandover.get(h))) {
+                abortHandover(h, b, String.format("no COMMIT from Fog %d within %d s",
+                        b.fogId, Config.HANDOVER_TIMEOUT_MS / 1000));
+            }
+        })), Config.HANDOVER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * On the origin: the target did not confirm the handover. The user stays here: the ping
+     * that triggered the handover is recorded, the PREPARE on the target is cancelled and the
+     * TTT counter starts again. If the target confirms later anyway (late COMMIT), the normal
+     * completion still applies and this node closes its visit.
+     */
+    private void abortHandover(String h, NodeRef b, String why) {
+        inHandover.remove(h);
+        addresses.remove(b.fogId);
+        Context ctx = contexts.get(h);
+        log("HANDOVER of %s... to Fog %d aborted (%s); the user stays in Fog %d", brief(h), b.fogId, why, id);
+        if (ctx != null) {
+            ctx.handovers--;
+            Ping trigger = ctx.triggerPing;
+            ctx.triggerPing = null;
+            if (trigger != null) {
+                record(trigger, ctx);
+            }
+        }
+        JsonObject cancel = new JsonObject();
+        cancel.addProperty("h", h);
+        FogCommunication.postAsync(b.http + "/handover/cancel", cancel);
+        commandEdge(h, ref);                                               // if the Edge is still here: stay
     }
 
     /** On the target: first ping (or relay) after the PREPARE. */
@@ -530,13 +571,16 @@ final class FogNode {
         }
     }
 
-    private void relay(NodeRef b, Ping p) {
+    /** Relays a ping to another Fog; false if that Fog did not answer. */
+    private boolean relay(NodeRef b, Ping p) {
         try {
             FogCommunication.post(b.http + "/handover/ping", p);
             log("ping %s of %s... relayed to Fog %d", p.time == null ? p.type : p.time, brief(p.h), b.fogId);
+            return true;
         } catch (IOException e) {
             log("failed to relay ping to Fog %d (%s)", b.fogId, e.getMessage());
             addresses.remove(b.fogId);
+            return false;
         }
     }
 
@@ -586,6 +630,13 @@ final class FogNode {
             } catch (Exception e) {
                 FogCommunication.respond(ex, 500, null);
             }
+        });
+        http.createContext("/handover/cancel", ex -> {
+            String h = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject().get("h").getAsString();
+            if (prepared.remove(h) != null) {
+                log("PREPARE for user %s... cancelled by the origin", brief(h));
+            }
+            FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/handover/release", ex -> {
             JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();

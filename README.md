@@ -123,6 +123,11 @@ record with the most recent ping, so two nodes claiming the same user always agr
   closed (`context_lost`) before a new stay starts.
 - At the end of the day the record is released (`fog = 0`).
 
+**Aborted handover.** If B does not confirm (`/handover/commit`) within `HTF_HANDOVER_TIMEOUT_MS`,
+or a relay to B fails, A aborts: it cancels the PREPARE on B (`/handover/cancel`) and keeps serving
+the user. An Edge that cannot reach B stays on A; an Edge whose broker stops answering goes back to
+the entry broker, which redirects it to the owner of its record.
+
 ### Handover decision (RSRP + Kalman + TTT)
 
 YJMob100K has no radio measurements, so the serving node computes a **synthetic RSRP** for each
@@ -225,6 +230,7 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `POST` | `/handover/commit` | Node B reports that the user arrived; node A closes its visit |
 | `POST` | `/handover/transfer` | A node asks for the context of a user who reappeared there |
 | `POST` | `/handover/release` | Another node now owns the user: close the visit and drop the context |
+| `POST` | `/handover/cancel` | The origin aborted the handover (no COMMIT in time): drop the PREPARE |
 | `GET` | `/status` | Successor list, predecessor and finger table (debugging) |
 | `POST` | `/admin/crash` | Simulates a crash (stops broker, API and timers without warning anyone) |
 
@@ -233,8 +239,8 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | Method | Endpoint | Called by | Purpose |
 |---|---|---|---|
 | `POST` | `/capture` | Fog | Receives a visit as a GS1 EPCIS 2.0 document (201 new, 200 repeated, 400 invalid) |
-| `GET` | `/events/{h}?day=20` | CMP | EPCIS events of pseudonym `h` on the day, in time order |
-| `GET` | `/trail/{h}?day=20` | CMP | Trail of `h` on the day (visits in arrival order) |
+| `GET` | `/events/{h}?day=20[&from=07:00&to=19:00][&toDay=21]` | CMP | EPCIS events of pseudonym `h` in the period, in time order |
+| `GET` | `/trail/{h}?day=20[&from=07:00&to=19:00][&toDay=21]` | CMP | Trail of `h` in the period: visits that overlap it, in arrival order |
 | `GET` | `/visits?fog=6&day=20` | CMP | Visits recorded by Fog 6 on day 20 |
 | `GET` | `/fogs?day=20` | CMP | Fog nodes with visits on the day: `[{fog, people, visits}]` |
 | `GET` | `/health` | anyone | Is the TMS up? |
@@ -363,6 +369,7 @@ curl localhost:8080/health                   # is the TMS up?
 curl 'localhost:8080/fogs?day=20'            # Fog nodes with visits on day 20
 curl 'localhost:8080/visits?fog=6&day=20'    # who passed through Fog 6 on day 20
 curl "localhost:8080/events/$H?day=20"       # EPCIS events of pseudonym $H on day 20
+curl "localhost:8080/trail/$H?day=20&from=07:00&to=19:00"   # trail between 07:00 and 19:00
 ```
 
 ---
@@ -386,6 +393,8 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_FOG_IDS`, `HTF_FOG_HOST`, `HTF_FOG_SEED` | Fog | Nodes to start (all), advertised host (`localhost`), seed URL (`http://localhost:9001`) |
 | `HTF_TMS_URL` | Fog, platform | TMS address (`http://localhost:8080`) |
 | `HTF_HANDOVER`, `HTF_HOM_DB`, `HTF_TTT_MIN` | Fog | Handover policy (`rsrp`), HOM (3 dB), TTT (60 min) |
+| `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
+| `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`data`) |
 | `HTF_USER`, `HTF_DAY`, `HTF_DATASET` | Edge | Simulated user (4005), day (20), dataset CSV |
 | `HTF_ENTRY_BROKER`, `HTF_PING_INTERVAL_MS` | Edge | Entry broker (`tcp://localhost:1901`), real time between pings (1000 ms) |
 | `HTF_START_DELAY_S`, `HTF_CONNECT_RETRY_S` | Edge | Wait before starting (0 s), keep retrying the broker for (0 s) |
@@ -396,8 +405,8 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 ## Limitations of the prototype
 
 - The TMS stores JSONL files; the design uses PostgreSQL with PostGIS, sharded by region.
-- The store-and-forward queue of each Fog node is in memory: it survives a TMS outage, not a crash
-  of the node itself.
+- The store-and-forward queue of each Fog node is persisted on the node's disk; visits that are
+  still open (not closed yet) are lost if the node crashes.
 - No vital signs are collected: the evaluation uses the positions of YJMob100K.
 - All devices share one salt and the pseudonym is fixed; a real deployment would give each device
   only its own `h` (or a per-person secret), rotate pseudonyms daily and authenticate devices on the

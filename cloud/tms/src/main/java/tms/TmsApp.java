@@ -20,9 +20,9 @@ import com.sun.net.httpserver.HttpServer;
  * TRAIL MANAGEMENT SERVICE (Cloud) - receives the visits from the Fogs and returns trails.
  *
  *   POST /capture              GS1 EPCIS 2.0 document sent by a Fog      -> 201 (new) | 200 (repeated) | 400
- *   GET  /events/{h}?day=N     EPCIS events of pseudonym h, in time order -> 200 [ ... ]
+ *   GET  /events/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]   EPCIS events of h in the period -> 200 [ ... ]
  *   GET  /visits?fog=F&day=N   visits recorded by Fog F on day N          -> 200 [ ... ]
- *   GET  /trail/{h}?day=N      visits of pseudonym h, in order            -> 200 [ ... ]
+ *   GET  /trail/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]    visits of h that overlap the period -> 200 [ ... ]
  *   GET  /fogs?day=N           Fog nodes with visits on day N             -> 200 [{fog, people, visits}]
  *   GET  /health
  *
@@ -101,15 +101,15 @@ public class TmsApp {
 
     private void events(HttpExchange ex) throws IOException {
         String h = ex.getRequestURI().getPath().substring("/events/".length());
-        Integer day;
+        Period period;
         try {
-            day = intParam(ex, "day");
-        } catch (NumberFormatException e) {
-            respond(ex, 400, "{\"error\":\"invalid day\"}");
+            period = period(ex);
+        } catch (IllegalArgumentException e) {
+            respond(ex, 400, error(e));
             return;
         }
         JsonArray arr = new JsonArray();
-        repo.events(h, day).forEach(arr::add);
+        repo.events(h, period).forEach(arr::add);
         respond(ex, 200, arr.toString());
     }
 
@@ -121,19 +121,34 @@ public class TmsApp {
             return;
         }
         String h = ex.getRequestURI().getPath().substring("/trail/".length());
-        Integer day;
+        Period period;
         try {
-            day = intParam(ex, "day");
-        } catch (NumberFormatException e) {
-            respond(ex, 400, "{\"error\":\"invalid day\"}");
+            period = period(ex);
+        } catch (IllegalArgumentException e) {
+            respond(ex, 400, error(e));
             return;
         }
-        List<JsonObject> trail = repo.trail(h, day);
+        List<JsonObject> trail = repo.trail(h, period);
         JsonArray arr = new JsonArray();
         trail.forEach(arr::add);
-        System.out.printf("[TMS] trail query %s... day %s -> %d visits%n",
-                h.substring(0, Math.min(16, h.length())), day, trail.size());
+        System.out.printf("[TMS] trail query %s... %s -> %d visits%n",
+                h.substring(0, Math.min(16, h.length())), period == null ? "all days" : period, trail.size());
         respond(ex, 200, arr.toString());
+    }
+
+    /** Period of a trail/events query: day (required for a filter), toDay, from and to (HH:MM). */
+    private static Period period(HttpExchange ex) {
+        try {
+            return Period.of(intParam(ex, "day"), intParam(ex, "toDay"), param(ex, "from"), param(ex, "to"));
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("day, toDay must be numbers and from, to must be HH:MM");
+        }
+    }
+
+    private static String error(IllegalArgumentException e) {
+        JsonObject err = new JsonObject();
+        err.addProperty("error", e.getMessage());
+        return err.toString();
     }
 
     // ------------------------------------------------ GET /visits?fog=F&day=N
@@ -179,12 +194,19 @@ public class TmsApp {
 
     /** Reads an integer parameter from the query string (null if absent). */
     private static Integer intParam(HttpExchange ex, String name) {
+        String v = param(ex, name);
+        return v == null ? null : Integer.parseInt(v);
+    }
+
+    /** Reads a text parameter from the query string (null if absent or empty). */
+    private static String param(HttpExchange ex, String name) {
         String query = ex.getRequestURI().getRawQuery();
         if (query != null) {
             for (String pair : query.split("&")) {
                 String[] kv = pair.split("=", 2);
                 if (kv[0].equals(name) && kv.length == 2) {
-                    return Integer.parseInt(URLDecoder.decode(kv[1], StandardCharsets.UTF_8).trim());
+                    String v = URLDecoder.decode(kv[1], StandardCharsets.UTF_8).trim();
+                    return v.isEmpty() ? null : v;
                 }
             }
         }

@@ -63,6 +63,11 @@ public final class Config {
     public static final double HOM_DB = Double.parseDouble(env("HTF_HOM_DB", "3"));
     /** Time to Trigger: the condition must hold for this long (minutes of dataset time). */
     public static final int TTT_MINUTES = Integer.parseInt(env("HTF_TTT_MIN", "60"));
+    /**
+     * Make-before-break: if the target Fog does not confirm the handover (COMMIT) within this
+     * time (real time), the origin aborts it, cancels the PREPARE and keeps serving the user.
+     */
+    public static final int HANDOVER_TIMEOUT_MS = Integer.parseInt(env("HTF_HANDOVER_TIMEOUT_MS", "10000"));
     /** Dataset time between two timeslots (YJMob100K: 30 min). */
     public static final int MINUTES_PER_SLOT = 30;
 
@@ -74,6 +79,8 @@ public final class Config {
     public static final String GS1_COMPANY_PREFIX = "0614141";
 
     // ------------------------------------------------------------------ cloud
+    /** Folder of each node's persistent store-and-forward queue: {DATA_DIR}/fog-{id}/outbox.jsonl. */
+    public static final String DATA_DIR = env("HTF_FOG_DATA", "data");
     /** Trail Management Service. The Fog does POST {TMS_URL}/capture with an EPCIS document. */
     public static final String TMS_URL = env("HTF_TMS_URL", "http://localhost:8080");
 

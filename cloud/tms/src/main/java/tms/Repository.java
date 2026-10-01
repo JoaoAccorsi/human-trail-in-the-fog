@@ -90,8 +90,8 @@ class Repository {
         }
     }
 
-    /** EPCIS events of a pseudonym (optionally of one day), in time order. */
-    synchronized List<JsonObject> events(String h, Integer day) throws IOException {
+    /** EPCIS events of the pseudonym's visits that overlap the period (null = all), in time order. */
+    synchronized List<JsonObject> events(String h, Period period) throws IOException {
         List<JsonObject> out = new ArrayList<>();
         if (!Files.exists(eventsFile)) {
             return out;
@@ -101,7 +101,8 @@ class Repository {
                 continue;
             }
             JsonObject l = JsonParser.parseString(line).getAsJsonObject();
-            if (l.get("h").getAsString().equals(h) && (day == null || l.get("day").getAsInt() == day)) {
+            if (l.get("h").getAsString().equals(h) && (period == null || period.overlaps(
+                    l.get("day").getAsInt(), l.get("arrivalT").getAsInt(), departureSlot(l)))) {
                 l.getAsJsonObject("document").getAsJsonObject("epcisBody").getAsJsonArray("eventList")
                         .forEach(e -> out.add(e.getAsJsonObject()));
             }
@@ -110,11 +111,23 @@ class Repository {
         return out;
     }
 
-    /** Visits of the pseudonym (optionally of one day only), in arrival order. */
-    synchronized List<JsonObject> trail(String h, Integer day) throws IOException {
+    /** Departure slot of a stored capture: the "htf:slot" of its departing event. */
+    private static int departureSlot(JsonObject line) {
+        for (var e : line.getAsJsonObject("document").getAsJsonObject("epcisBody").getAsJsonArray("eventList")) {
+            JsonObject o = e.getAsJsonObject();
+            if ("departing".equals(o.get("bizStep").getAsString()) && o.has("htf:slot")) {
+                return o.get("htf:slot").getAsInt();
+            }
+        }
+        return line.get("arrivalT").getAsInt();
+    }
+
+    /** Visits of the pseudonym that overlap the period (null = all), in arrival order. */
+    synchronized List<JsonObject> trail(String h, Period period) throws IOException {
         List<JsonObject> out = new ArrayList<>();
         for (JsonObject v : read().values()) {
-            if (v.get("h").getAsString().equals(h) && (day == null || v.get("day").getAsInt() == day)) {
+            if (v.get("h").getAsString().equals(h) && (period == null || period.overlaps(
+                    v.get("day").getAsInt(), v.get("arrivalT").getAsInt(), v.get("departureT").getAsInt()))) {
                 out.add(v);
             }
         }

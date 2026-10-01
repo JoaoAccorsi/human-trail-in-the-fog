@@ -33,6 +33,9 @@ import com.google.gson.Gson;
  * 5. When the Fog sends a handover command ("connect to the broker of Fog B"), it connects to
  *    the new broker BEFORE disconnecting from the old one (make-before-break) and keeps publishing there.
  * 6. At the end, publishes an "end" message so the Fog closes the day.
+ * 7. If the broker of the target Fog cannot be reached, it stays on the current one; if the
+ *    current broker stops answering, it reconnects to the entry broker (Fog 1), which
+ *    redirects it to the Fog that owns its context on the Chord ring.
  *
  * The Edge does not know how the city is split into Fogs: the Fog decides where it goes.
  *
@@ -88,12 +91,12 @@ public class EdgeApp {
 
         for (Ping p : pings) {
             switchBrokerIfNeeded(h);
-            publish(current, p);
+            publishOrFallBack(h, p);
             System.out.printf("[Edge] %s  cell (%d,%d)  -> %s%n", p.time, p.x, p.y, currentFog);
             Thread.sleep(Config.PING_INTERVAL_MS);
         }
         switchBrokerIfNeeded(h);
-        publish(current, Ping.end(h, Config.DAY));
+        publishOrFallBack(h, Ping.end(h, Config.DAY));
         System.out.printf("[Edge] end of day published -> %s%n", currentFog);
         Thread.sleep(500);
         current.disconnect();
@@ -110,13 +113,64 @@ public class EdgeApp {
         if (c.broker.equals(current.getServerURI())) {
             return;
         }
-        MqttClient next = connect(c.broker, h);
+        MqttClient next;
+        try {
+            next = connect(c.broker, h);
+        } catch (MqttException e) {
+            System.out.printf("[Edge] could not connect to Fog %d (%s, reason %d); staying on %s%n",
+                    c.fog, c.broker, e.getReasonCode(), currentFog);
+            return;
+        }
         MqttClient old = current;
         current = next;
-        old.disconnect();
-        old.close();
+        closeQuietly(old);
         currentFog = "Fog " + c.fog;
         System.out.printf("[Edge] HANDOVER: now connected to Fog %d (%s)%n", c.fog, c.broker);
+    }
+
+    /**
+     * Publishes on the current broker. If it does not answer (e.g. the Fog went down), the Edge
+     * goes back to the entry broker and publishes there: the entry node redirects it to the Fog
+     * that owns its context, or to the Fog of its cell.
+     */
+    private static void publishOrFallBack(String h, Ping p) throws MqttException, InterruptedException {
+        try {
+            publish(current, p);
+            return;
+        } catch (MqttException e) {
+            System.out.printf("[Edge] broker of %s did not answer (reason %d); back to the entry broker %s%n",
+                    currentFog, e.getReasonCode(), Config.ENTRY_BROKER);
+        }
+        closeQuietly(current);
+        pending = null;
+        for (int attempt = 1; ; attempt++) {
+            try {
+                current = connect(Config.ENTRY_BROKER, h);
+                break;
+            } catch (MqttException e) {
+                if (attempt >= 30) {
+                    throw e;
+                }
+                Thread.sleep(1000);
+            }
+        }
+        currentFog = "entry (Fog " + Config.ENTRY_FOG + ")";
+        publish(current, p);
+    }
+
+    private static void closeQuietly(MqttClient c) {
+        try {
+            if (c.isConnected()) {
+                c.disconnect();
+            }
+        } catch (MqttException ignored) {
+            // the broker is already gone
+        }
+        try {
+            c.close();
+        } catch (MqttException ignored) {
+            // nothing else to release
+        }
     }
 
     /** h(s, e) = HMAC-SHA256(salt, uid) in hexadecimal. */

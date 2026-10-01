@@ -19,15 +19,28 @@ def pseudonym(uid: int, salt: str = config.SALT) -> str:
     return hmac.new(salt.encode(), str(uid).encode(), hashlib.sha256).hexdigest()
 
 
-def fetch_trail(h: str, day: int, url: str = config.TMS_URL) -> list[dict]:
-    resp = requests.get(f"{url}/trail/{h}", params={"day": day}, timeout=5)
+def _period(day: int, start: str | None, end: str | None) -> dict:
+    """Query parameters of a period on one day; start/end as "HH:MM" (None = whole day)."""
+    params = {"day": day}
+    if start:
+        params["from"] = start
+    if end:
+        params["to"] = end
+    return params
+
+
+def fetch_trail(h: str, day: int, url: str = config.TMS_URL,
+                start: str | None = None, end: str | None = None) -> list[dict]:
+    """Visits of h that overlap the period (the TMS returns each visit whole)."""
+    resp = requests.get(f"{url}/trail/{h}", params=_period(day, start, end), timeout=5)
     resp.raise_for_status()
     return resp.json()
 
 
-def fetch_events(h: str, day: int, url: str = config.TMS_URL) -> list[dict]:
-    """GS1 EPCIS 2.0 events (arriving/departing) the Fogs sent for this pseudonym and day."""
-    resp = requests.get(f"{url}/events/{h}", params={"day": day}, timeout=5)
+def fetch_events(h: str, day: int, url: str = config.TMS_URL,
+                 start: str | None = None, end: str | None = None) -> list[dict]:
+    """GS1 EPCIS 2.0 events (arriving/departing) the Fogs sent for this pseudonym in the period."""
+    resp = requests.get(f"{url}/events/{h}", params=_period(day, start, end), timeout=5)
     resp.raise_for_status()
     return resp.json()
 
