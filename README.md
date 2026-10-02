@@ -240,7 +240,7 @@ re-identify someone (home and work), so such queries must be restricted to autho
 
 | Method | Endpoint | Called by | Purpose |
 |---|---|---|---|
-| `POST` | `/capture` | Fog | Receives a visit as a GS1 EPCIS 2.0 document (201 new, 200 repeated, 400 invalid) |
+| `POST` | `/capture` | Fog | Receives a GS1 EPCIS 2.0 document with one visit or a batch (201 some new, 200 all repeated, 400 invalid) |
 | `GET` | `/events/{h}?day=20[&from=07:00&to=19:00][&toDay=21]` | CMP | EPCIS events of pseudonym `h` in the period, in time order |
 | `GET` | `/trail/{h}?day=20[&from=07:00&to=19:00][&toDay=21]` | CMP | Trail of `h` in the period: visits that overlap it, in arrival order |
 | `GET` | `/visits?fog=6&day=20` | CMP | Visits recorded by Fog 6 on day 20 |
@@ -356,6 +356,20 @@ sequenceDiagram
     F15->>F15: predecessor = Fog 6 — ring repaired
 ```
 
+**Batches to the TMS.** Visits are not posted one by one: each Fog node queues them (on disk) and,
+every `HTF_TMS_BATCH_WINDOW_MS` or as soon as `HTF_TMS_BATCH_MAX` are ready, sends one EPCIS
+document with the events of all of them (an EPCIS document may carry any number of events). The
+TMS splits the document into visits, pairing each `arriving` with its `departing` event. Visits
+closed at the end of the day wait a random 0..`HTF_END_OF_DAY_JITTER_MS` before leaving, so the
+nodes do not all hit the TMS at the same instant.
+
+**Logic lanes.** Each Fog node processes its users on `HTF_FOG_LANES` single-thread lanes chosen by
+the pseudonym: one person's pings are always handled in order by the same lane, while different
+people run in parallel. A lane that waits on the network (ring lookup, PREPARE, context transfer)
+only delays the users of that lane. Visits are sent to the TMS by a separate sender thread, and the
+owner-record refresh runs on a background thread, so no user waits for the cloud or for the ring
+maintenance.
+
 **64-bit identifiers.** Nodes and keys are placed on the ring by the first 64 bits of their SHA-1
 (unsigned longs). With 16 bits (65,536 positions), a ring of 1,000 nodes would already have about 8
 pairs of nodes sharing an identifier (birthday paradox, ~N^2 / 2^17); with 64 bits collisions are
@@ -418,6 +432,9 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_FOG_IDS`, `HTF_FOG_HOST`, `HTF_FOG_SEED` | Fog | Nodes to start (all), advertised host (`localhost`), seed URL (`http://localhost:9001`) |
 | `HTF_TMS_URL` | Fog, platform | TMS address (`http://localhost:8080`) |
 | `HTF_HANDOVER`, `HTF_HOM_DB`, `HTF_TTT_MIN` | Fog | Handover policy (`rsrp`), HOM (3 dB), TTT (60 min) |
+| `HTF_TMS_BATCH_MAX`, `HTF_TMS_BATCH_WINDOW_MS` | Fog | Visits per EPCIS document sent to the TMS (500) and flush period (1000 ms) |
+| `HTF_END_OF_DAY_JITTER_MS` | Fog | Random delay (0..value) before sending the visits closed at the end of the day (5000 ms) |
+| `HTF_FOG_LANES` | Fog | Logic lanes per node: users are spread over this many threads by pseudonym; one user's pings stay in order (8) |
 | `HTF_OWNER_REFRESH_MS`, `HTF_OWNER_REFRESH_JITTER_MS` | Fog | Full republication of the owner records (300000 ms); random extra wait after a failure (2000 ms) |
 | `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
 | `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`data`) |

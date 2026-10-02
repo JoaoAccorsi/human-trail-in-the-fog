@@ -413,7 +413,7 @@ final class ChordNode {
      * is split into disjoint intervals, one per finger, and each finger is responsible for
      * forwarding inside its interval. N - 1 messages, depth O(log N), at most O(log N) sends per
      * node, and no lookup of addresses ("fog:{id}" records may have been lost with a failed node).
-     * Blocking: call it off the HTTP handlers and the logic thread.
+     * Blocking: call it off the HTTP handlers and the users' lanes.
      */
     int broadcast(String path, JsonObject payload) {
         return forward(path, payload, self.id);

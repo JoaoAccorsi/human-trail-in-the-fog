@@ -1,12 +1,19 @@
 package tms;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
 /**
- * Reads a GS1 EPCIS 2.0 document sent by a Fog (two ObjectEvents: "arriving" and "departing")
- * and derives the visit used by the trail queries.
+ * Reads a GS1 EPCIS 2.0 document sent by a Fog and derives the visits used by the trail queries.
+ * Each visit is a pair of ObjectEvents, "arriving" and "departing"; a document may carry the
+ * pairs of many visits (the Fogs send in batches). The pair of a visit is matched by
+ * pseudonym + htf:day + Fog + arrival slot (htf:slot of "arriving", htf:arrivalSlot of "departing").
  *
  *   what  epcList[0]       urn:htf:pseudonym:{h}
  *   where readPoint.id     urn:epc:id:sgln:{prefix}.{fog, 5 digits}.0
@@ -20,7 +27,71 @@ final class EpcisReader {
     private EpcisReader() {
     }
 
-    /** Returns the visit, or throws IllegalArgumentException explaining what is wrong with the document. */
+    /** A visit derived from a document, and the document reduced to that visit's two events. */
+    record Capture(JsonObject visit, JsonObject document) {
+    }
+
+    /** Result of reading a document: the valid visits and how many event pairs were rejected. */
+    record Batch(List<Capture> captures, int rejected, String firstError) {
+    }
+
+    /**
+     * Splits a document into visits. Throws IllegalArgumentException if the document itself is
+     * invalid; an invalid visit inside a valid document is counted as rejected, so one bad visit
+     * never blocks the others of the batch (the Fog would otherwise resend the batch forever).
+     */
+    static Batch toVisits(JsonObject doc) {
+        if (!"EPCISDocument".equals(str(doc, "type"))) {
+            throw new IllegalArgumentException("type must be EPCISDocument");
+        }
+        JsonArray events = obj(doc, "epcisBody").getAsJsonArray("eventList");
+        if (events == null) {
+            throw new IllegalArgumentException("missing epcisBody.eventList");
+        }
+        Map<String, JsonObject[]> pairs = new LinkedHashMap<>();
+        int rejected = 0;
+        String firstError = null;
+        for (JsonElement el : events) {
+            JsonObject e = el.getAsJsonObject();
+            String step = str(e, "bizStep");
+            if (!"ObjectEvent".equals(str(e, "type")) || !("arriving".equals(step) || "departing".equals(step))) {
+                continue;
+            }
+            try {
+                String slotField = "arriving".equals(step) ? "htf:slot" : "htf:arrivalSlot";
+                String key = e.getAsJsonArray("epcList").get(0).getAsString() + "|" + num(e, "htf:day") + "|"
+                        + obj(e, "readPoint").get("id").getAsString() + "|" + num(e, slotField);
+                pairs.computeIfAbsent(key, k -> new JsonObject[2])["arriving".equals(step) ? 0 : 1] = e;
+            } catch (RuntimeException ex) {
+                rejected++;
+                firstError = firstError == null ? ex.getMessage() : firstError;
+            }
+        }
+        List<Capture> out = new ArrayList<>();
+        for (JsonObject[] p : pairs.values()) {
+            try {
+                JsonObject single = new JsonObject();
+                doc.entrySet().forEach(x -> single.add(x.getKey(), x.getValue()));
+                JsonArray two = new JsonArray();
+                if (p[0] != null) {
+                    two.add(p[0]);
+                }
+                if (p[1] != null) {
+                    two.add(p[1]);
+                }
+                JsonObject body = new JsonObject();
+                body.add("eventList", two);
+                single.add("epcisBody", body);
+                out.add(new Capture(toVisit(single), single));
+            } catch (RuntimeException ex) {
+                rejected++;
+                firstError = firstError == null ? ex.getMessage() : firstError;
+            }
+        }
+        return new Batch(out, rejected, firstError);
+    }
+
+    /** Returns the visit of a one-visit document, or throws IllegalArgumentException explaining what is wrong. */
     static JsonObject toVisit(JsonObject doc) {
         if (!"EPCISDocument".equals(str(doc, "type"))) {
             throw new IllegalArgumentException("type must be EPCISDocument");

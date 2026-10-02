@@ -58,7 +58,7 @@ import com.sun.net.httpserver.HttpServer;
  *     predecessor of the failed node broadcasts the lost range of keys over the finger tables
  *     (POST /ring/changed, each node forwards it inside its interval), and every node
  *     republishes only the records of its users that fall
- *     in that range, after a random delay, off the logic thread and grouped by responsible
+ *     in that range, after a random delay, off the users' lanes and grouped by responsible
  *     node. All records are also republished every OWNER_REFRESH_MS (safety net).
  *
  * Handover API:
@@ -86,21 +86,27 @@ final class FogNode {
     private MqttClient mqtt;
     private final TmsClient tms;
 
-    /** All node logic runs on this single thread: no concurrency on the state. */
-    private final ExecutorService logic = Executors.newSingleThreadExecutor();
+    /**
+     * Node logic runs on Config.FOG_LANES single-thread lanes, chosen by the user's pseudonym:
+     * the pings of one person are always processed in order, by the same lane, while different
+     * people are processed in parallel. A lane that waits on the network (ring lookup, PREPARE,
+     * context transfer) only delays the users of that lane, not the whole node. The state is
+     * kept in concurrent maps, and each user's entries are touched only by that user's lane.
+     */
+    private final ExecutorService[] lanes = new ExecutorService[Config.FOG_LANES];
     private final ScheduledExecutorService timers = Executors.newScheduledThreadPool(1);
 
-    private final Map<String, Context> contexts = new HashMap<>();            // users being served
-    private final Map<String, Visit> openVisits = new HashMap<>();            // open visits
+    private final Map<String, Context> contexts = new ConcurrentHashMap<>();  // users being served
+    private final Map<String, Visit> openVisits = new ConcurrentHashMap<>();  // open visits
     private final Map<String, Context> prepared = new ConcurrentHashMap<>();  // received via PREPARE
-    private final Map<String, NodeRef> inHandover = new HashMap<>();          // h -> target Fog
+    private final Map<String, NodeRef> inHandover = new ConcurrentHashMap<>(); // h -> target Fog
     private final Map<Integer, NodeRef> addresses = new ConcurrentHashMap<>(); // cache of "fog:{id}"
     private final AtomicBoolean refreshScheduled = new AtomicBoolean(false);
     /** Lost key ranges waiting for the next targeted refresh (guarded by itself). */
     private final List<ChordNode.Range> lostRanges = new ArrayList<>();
     /** Lost ranges already received (broadcast deduplication), with the time they arrived. */
     private final Map<ChordNode.Range, Long> seenRanges = new HashMap<>();
-    /** Owner-record writes and failure announcements: never on the logic thread. */
+    /** Owner-record writes and failure announcements: never on the users' lanes. */
     private final ExecutorService background = Executors.newSingleThreadExecutor();
 
     FogNode(int id) {
@@ -108,6 +114,9 @@ final class FogNode {
         this.ref = NodeRef.ofFog(id);
         this.chord = new ChordNode(ref, this::log);
         this.tms = new TmsClient(id);
+        for (int i = 0; i < lanes.length; i++) {
+            lanes[i] = Executors.newSingleThreadExecutor();
+        }
     }
 
     // =========================================================== startup
@@ -130,20 +139,19 @@ final class FogNode {
         timers.scheduleWithFixedDelay(chord::checkPredecessor, 600, 500, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(chord::fixFingers, 400, 150, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(this::publishAddress, 500, 3000, TimeUnit.MILLISECONDS);
-        timers.scheduleWithFixedDelay(() -> logic.execute(() -> safely(() -> refreshOwnership(null, null))),
+        timers.scheduleWithFixedDelay(() -> background.execute(() -> safely(() -> refreshOwnership(null, null))),
                 Config.OWNER_REFRESH_MS, Config.OWNER_REFRESH_MS, TimeUnit.MILLISECONDS);
         chord.onRingChange(range -> {
             scheduleOwnerRefresh(range, "my successor went down");
             background.execute(() -> safely(() -> announceRingChange(range)));
         });
-        timers.scheduleWithFixedDelay(() -> logic.execute(tms::resendPending), 5, 5, TimeUnit.SECONDS);
 
         mqtt = new MqttClient(ref.mqtt, "htf-fog-" + id, new MemoryPersistence());
         mqtt.setCallback(new MqttCallback() {
             @Override
             public void messageArrived(String topic, MqttMessage msg) {
                 Ping p = FogApp.JSON.fromJson(new String(msg.getPayload(), StandardCharsets.UTF_8), Ping.class);
-                logic.execute(() -> safely(() -> onPing(p)));
+                lane(p.h).execute(() -> safely(() -> onPing(p)));
             }
 
             @Override
@@ -202,11 +210,19 @@ final class FogNode {
         if (broker != null) {
             broker.stop();
         }
-        logic.shutdownNow();
+        for (ExecutorService lane : lanes) {
+            lane.shutdownNow();
+        }
+        tms.stop();
         background.shutdownNow();
     }
 
-    // =========================================================== logic ("logic" thread)
+    // =========================================================== logic (the user's lane)
+
+    /** Lane of a user: always the same one, so the user's pings are processed in order. */
+    private ExecutorService lane(String h) {
+        return lanes[Math.floorMod(h.hashCode(), lanes.length)];
+    }
 
     private void onPing(Ping p) {
         String h = p.h;
@@ -340,7 +356,7 @@ final class FogNode {
         commandEdge(p.h, b);                                               // 2. Edge switches broker
         log("PREPARE accepted by Fog %d; Edge told to connect to %s", target, b.mqtt);
         String h = p.h;
-        timers.schedule(() -> logic.execute(() -> safely(() -> {
+        timers.schedule(() -> lane(h).execute(() -> safely(() -> {
             if (b.equals(inHandover.get(h))) {
                 abortHandover(h, b, String.format("no COMMIT from Fog %d within %d s",
                         b.fogId, Config.HANDOVER_TIMEOUT_MS / 1000));
@@ -430,8 +446,10 @@ final class FogNode {
         }
         if (v != null) {
             v.reason = "end_of_day";
-            log("end of day | visit %s-%s (%d pings) -> TMS", v.arrival, v.departure, v.pings);
-            tms.send(v);
+            long delay = ThreadLocalRandom.current().nextLong(Config.END_OF_DAY_JITTER_MS + 1L);
+            log("end of day | visit %s-%s (%d pings) -> TMS in %.1f s (end-of-day jitter)",
+                    v.arrival, v.departure, v.pings, delay / 1000.0);
+            tms.send(v, delay);
         }
     }
 
@@ -556,7 +574,7 @@ final class FogNode {
         if (refreshScheduled.compareAndSet(false, true)) {
             long delay = Config.OWNER_REFRESH_DELAY_MS
                     + ThreadLocalRandom.current().nextLong(Config.OWNER_REFRESH_JITTER_MS + 1L);
-            timers.schedule(() -> logic.execute(() -> safely(() -> {
+            timers.schedule(() -> background.execute(() -> safely(() -> {
                 refreshScheduled.set(false);
                 List<ChordNode.Range> ranges;
                 synchronized (lostRanges) {
@@ -571,8 +589,8 @@ final class FogNode {
     /**
      * Republishes "h:{h} -> this Fog" for the users served here (not those in a handover):
      * only the keys inside the lost ranges, or all of them when ranges is null (periodic).
-     * Runs on the logic thread only to take a snapshot; the writes go to the background thread,
-     * grouped by responsible node, and their results come back to the logic thread.
+     * Runs on the background thread: takes a snapshot of the (concurrent) maps, writes grouped by
+     * responsible node, and hands each user's result to that user's lane.
      * The conditional write never overwrites a more recent owner and recreates a lost record.
      */
     private void refreshOwnership(List<ChordNode.Range> ranges, String reason) {
@@ -594,10 +612,8 @@ final class FogNode {
             }
             return;
         }
-        background.execute(() -> safely(() -> {
-            Map<String, ChordNode.Claim> results = chord.claimAll(records);
-            logic.execute(() -> safely(() -> applyRefresh(records.size(), results, reason)));
-        }));
+        Map<String, ChordNode.Claim> results = chord.claimAll(records);
+        applyRefresh(records.size(), results, reason);
     }
 
     private static boolean inRanges(long key, List<ChordNode.Range> ranges) {
@@ -612,7 +628,7 @@ final class FogNode {
         return false;
     }
 
-    /** Logic thread: acts on the results of a refresh (lost ownership, stale owners, restored records). */
+    /** Acts on the results of a refresh: each user's action runs on that user's lane. */
     private void applyRefresh(int sent, Map<String, ChordNode.Claim> results, String reason) {
         int restored = 0;
         for (Map.Entry<String, ChordNode.Claim> e : results.entrySet()) {
@@ -620,10 +636,12 @@ final class FogNode {
             int winner = fogOf(e.getValue().stored());
             int previous = fogOf(e.getValue().previous());
             if (winner != id) {
-                if (contexts.containsKey(h) && !inHandover.containsKey(h)) {
-                    log("OIDA: Fog %d holds a more recent context of %s...; releasing mine", winner, brief(h));
-                    handOverContext(h, winner);
-                }
+                lane(h).execute(() -> safely(() -> {
+                    if (contexts.containsKey(h) && !inHandover.containsKey(h)) {
+                        log("OIDA: Fog %d holds a more recent context of %s...; releasing mine", winner, brief(h));
+                        handOverContext(h, winner);
+                    }
+                }));
                 continue;
             }
             if (previous != id) {
@@ -764,21 +782,21 @@ final class FogNode {
         });
         http.createContext("/handover/ping", ex -> {
             Ping p = FogApp.JSON.fromJson(FogCommunication.body(ex), Ping.class);
-            logic.execute(() -> safely(() -> onPing(p)));
+            lane(p.h).execute(() -> safely(() -> onPing(p)));
             FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/handover/commit", ex -> {
             JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             String h = b.get("h").getAsString();
             int nextFog = b.get("nextFog").getAsInt();
-            logic.execute(() -> safely(() -> completeHandover(h, nextFog)));
+            lane(h).execute(() -> safely(() -> completeHandover(h, nextFog)));
             FogCommunication.respond(ex, 202, null);
         });
         http.createContext("/handover/transfer", ex -> {
             JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             String h = b.get("h").getAsString();
             int nextFog = b.get("nextFog").getAsInt();
-            Future<Context> f = logic.submit(() -> handOverContext(h, nextFog));
+            Future<Context> f = lane(h).submit(() -> handOverContext(h, nextFog));
             try {
                 Context ctx = f.get(5, TimeUnit.SECONDS);
                 FogCommunication.respond(ex, ctx == null ? 404 : 200, ctx);
@@ -812,7 +830,7 @@ final class FogNode {
             JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
             String h = b.get("h").getAsString();
             int nextFog = b.get("nextFog").getAsInt();
-            logic.execute(() -> safely(() -> {
+            lane(h).execute(() -> safely(() -> {
                 if (contexts.containsKey(h) || openVisits.containsKey(h)) {
                     log("Fog %d now owns %s...; closing my visit and dropping the context", nextFog, brief(h));
                     handOverContext(h, nextFog);

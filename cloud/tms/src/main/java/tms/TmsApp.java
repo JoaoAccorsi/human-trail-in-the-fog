@@ -19,7 +19,7 @@ import com.sun.net.httpserver.HttpServer;
 /**
  * TRAIL MANAGEMENT SERVICE (Cloud) - receives the visits from the Fogs and returns trails.
  *
- *   POST /capture              GS1 EPCIS 2.0 document sent by a Fog      -> 201 (new) | 200 (repeated) | 400
+ *   POST /capture              GS1 EPCIS 2.0 document (one visit or a batch) -> 201 (some new) | 200 (all repeated) | 400
  *   GET  /events/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]   EPCIS events of h in the period -> 200 [ ... ]
  *   GET  /visits?fog=F&day=N   visits recorded by Fog F on day N          -> 200 [ ... ]
  *   GET  /trail/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]    visits of h that overlap the period -> 200 [ ... ]
@@ -76,11 +76,15 @@ public class TmsApp {
             respond(ex, 405, "{\"error\":\"use POST\"}");
             return;
         }
-        JsonObject doc;
-        JsonObject v;
+        EpcisReader.Batch batch;
         try (InputStream in = ex.getRequestBody()) {
-            doc = JsonParser.parseString(new String(in.readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
-            v = EpcisReader.toVisit(doc);
+            JsonObject doc = JsonParser.parseString(new String(in.readAllBytes(), StandardCharsets.UTF_8)).getAsJsonObject();
+            batch = EpcisReader.toVisits(doc);
+            if (batch.captures().isEmpty()) {
+                throw new IllegalArgumentException(batch.firstError() == null
+                        ? "the document needs one 'arriving' and one 'departing' ObjectEvent per visit"
+                        : batch.firstError());
+            }
         } catch (IllegalArgumentException e) {
             JsonObject err = new JsonObject();
             err.addProperty("error", "invalid EPCIS document: " + e.getMessage());
@@ -90,11 +94,23 @@ public class TmsApp {
             respond(ex, 400, "{\"error\":\"invalid JSON\"}");
             return;
         }
-        boolean isNew = repo.saveCapture(v, doc);
-        System.out.printf("[TMS] EPCIS capture Fog %5d %s-%s (%s)%s%n", v.get("fog").getAsInt(),
-                v.get("arrival").getAsString(), v.get("departure").getAsString(), v.get("reason").getAsString(),
-                isNew ? "" : "  [repeated, ignored]");
-        respond(ex, isNew ? 201 : 200, "{\"ok\":true,\"new\":" + isNew + "}");
+        int added = repo.saveCaptures(batch.captures());
+        int visits = batch.captures().size();
+        if (visits == 1) {
+            JsonObject v = batch.captures().get(0).visit();
+            System.out.printf("[TMS] EPCIS capture Fog %5d %s-%s (%s)%s%n", v.get("fog").getAsInt(),
+                    v.get("arrival").getAsString(), v.get("departure").getAsString(), v.get("reason").getAsString(),
+                    added == 1 ? "" : "  [repeated, ignored]");
+        } else {
+            System.out.printf("[TMS] EPCIS capture: batch of %d visits, %d new, %d repeated%s%n", visits, added,
+                    visits - added, batch.rejected() > 0 ? ", " + batch.rejected() + " rejected (" + batch.firstError() + ")" : "");
+        }
+        JsonObject r = new JsonObject();
+        r.addProperty("ok", true);
+        r.addProperty("visits", visits);
+        r.addProperty("new", added);
+        r.addProperty("rejected", batch.rejected());
+        respond(ex, added > 0 ? 201 : 200, r.toString());
     }
 
     // -------------------------------------------------------- GET /events/{h}?day=

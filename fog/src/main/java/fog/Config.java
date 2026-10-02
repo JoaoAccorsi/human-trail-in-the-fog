@@ -51,7 +51,7 @@ public final class Config {
      * only the records of its users whose key was stored on the failed node (the lost range),
      * OWNER_REFRESH_DELAY_MS plus a random 0..OWNER_REFRESH_JITTER_MS later (so the nodes do not
      * all write at the same instant). As a safety net, all records are republished every
-     * OWNER_REFRESH_MS. The writes run off the node's logic thread, grouped by responsible node.
+     * OWNER_REFRESH_MS. The writes run off the users' lanes, grouped by responsible node.
      */
     public static final int OWNER_REFRESH_MS = Integer.parseInt(env("HTF_OWNER_REFRESH_MS", "300000"));
     /** Wait after a ring change before republishing (lets the ring repair its successors first). */
@@ -96,8 +96,25 @@ public final class Config {
     public static final String GS1_COMPANY_PREFIX = "0614141";
 
     // ------------------------------------------------------------------ cloud
+    /**
+     * Number of logic lanes per Fog node: single-thread executors chosen by the user's pseudonym
+     * (one person's pings stay in order; different people run in parallel).
+     */
+    public static final int FOG_LANES = Integer.parseInt(env("HTF_FOG_LANES", "8"));
     /** Folder of each node's persistent store-and-forward queue: {DATA_DIR}/fog-{id}/outbox.jsonl. */
     public static final String DATA_DIR = env("HTF_FOG_DATA", "data");
+    /**
+     * Visits are sent to the TMS in batches: one EPCIS document with the events of up to
+     * TMS_BATCH_MAX visits, flushed every TMS_BATCH_WINDOW_MS (or as soon as a batch is full).
+     */
+    public static final int TMS_BATCH_MAX = Integer.parseInt(env("HTF_TMS_BATCH_MAX", "500"));
+    public static final int TMS_BATCH_WINDOW_MS = Integer.parseInt(env("HTF_TMS_BATCH_WINDOW_MS", "1000"));
+    /**
+     * Visits closed at the end of the day are sent after a random delay of 0..END_OF_DAY_JITTER_MS,
+     * so that the Fog nodes do not all flood the TMS at the same instant. They are written to the
+     * persistent queue right away, so the delay never puts them at risk.
+     */
+    public static final int END_OF_DAY_JITTER_MS = Integer.parseInt(env("HTF_END_OF_DAY_JITTER_MS", "5000"));
     /** Trail Management Service. The Fog does POST {TMS_URL}/capture with an EPCIS document. */
     public static final String TMS_URL = env("HTF_TMS_URL", "http://localhost:8080");
 

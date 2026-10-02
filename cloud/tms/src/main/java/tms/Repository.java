@@ -64,13 +64,23 @@ class Repository {
     }
 
     /**
-     * Saves an EPCIS capture: the raw document goes to the event repository and the derived
-     * visit to the query store. Returns false if the visit already existed (resend).
+     * Saves the visits of a captured EPCIS document (one or a batch): each visit's events go to
+     * the event repository and the visit to the query store. Visits that already exist (resends)
+     * are skipped. Returns how many were new. The stored visits are read once per batch.
      */
-    synchronized boolean saveCapture(JsonObject v, JsonObject document) throws IOException {
-        if (read().containsKey(key(v))) {
-            return false;
+    synchronized int saveCaptures(List<EpcisReader.Capture> captures) throws IOException {
+        Set<String> known = new HashSet<>(read().keySet());
+        int added = 0;
+        for (EpcisReader.Capture c : captures) {
+            if (known.add(key(c.visit()))) {
+                saveCapture(c.visit(), c.document());
+                added++;
+            }
         }
+        return added;
+    }
+
+    private void saveCapture(JsonObject v, JsonObject document) throws IOException {
         JsonObject line = new JsonObject();
         line.addProperty("h", v.get("h").getAsString());
         line.addProperty("day", v.get("day").getAsInt());
@@ -79,7 +89,6 @@ class Repository {
         line.add("document", document);
         append(eventsFile, line);
         append(file, v);
-        return true;
     }
 
     private static void append(Path f, JsonObject o) throws IOException {
