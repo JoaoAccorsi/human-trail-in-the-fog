@@ -40,7 +40,8 @@ import com.sun.net.httpserver.HttpServer;
  *   A: RSRP of B > RSRP of A + HOM for TTT (HandoverDecision) -> looks up B's address on the Chord ring
  *   A -> B  POST /handover/prepare {context}       B keeps the context as "prepared"
  *   A -> Edge (MQTT htf/edge/{h}/control)          "connect to B's broker"
- *   Edge -> B  ping on B's broker                  B activates the context and continues the trail
+ *   Edge -> B  "attach" on B's broker              B activates the context at once and continues the trail
+ *              (or the first ping, if the attach is lost)
  *   B -> A  POST /handover/commit                  A closes the visit and sends it to the TMS
  *   Pings that still reach A in the meantime are relayed to B (POST /handover/ping).
  *   If B does not COMMIT within HANDOVER_TIMEOUT_MS, or a relay to B fails, A aborts the
@@ -226,6 +227,13 @@ final class FogNode {
 
     private void onPing(Ping p) {
         String h = p.h;
+
+        if ("attach".equals(p.type)) {                // the Edge connected to this broker after a command
+            if (prepared.containsKey(h)) {
+                activateHandover(h);                  // take over now, without waiting for the next ping
+            }
+            return;
+        }
 
         NodeRef pendingTarget = inHandover.get(h);
         if (pendingTarget != null) {                  // make-before-break: still arriving here

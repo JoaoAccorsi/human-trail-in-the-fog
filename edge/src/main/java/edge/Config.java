@@ -7,6 +7,14 @@ package edge;
 public final class Config {
 
     public static final int USER = Integer.parseInt(env("HTF_USER", "4005"));
+    /**
+     * Several users in one Edge process: "4000-5000", "4000,4005,4011" or a mix ("4000-4010,4500").
+     * Each user is a separate simulated phone (its own MQTT connection and handover state), and
+     * all of them replay the day on a shared clock. Empty = only HTF_USER.
+     */
+    public static final String USERS = env("HTF_USERS", "");
+    /** Threads that publish the pings of one timeslot in parallel (multi-user mode). */
+    public static final int EDGE_THREADS = Integer.parseInt(env("HTF_EDGE_THREADS", "32"));
     public static final int DAY = Integer.parseInt(env("HTF_DAY", "20"));
 
     public static final String DATASET = env("HTF_DATASET", "../YJMob100K/yjmob100k-dataset2.csv");
@@ -36,6 +44,24 @@ public final class Config {
     private static String env(String name, String fallback) {
         String v = System.getenv(name);
         return v == null || v.isBlank() ? fallback : v;
+    }
+
+    /** Users to simulate: HTF_USERS (list and ranges) or just HTF_USER. */
+    public static java.util.List<Integer> users() {
+        java.util.TreeSet<Integer> out = new java.util.TreeSet<>();
+        if (USERS.isBlank()) {
+            out.add(USER);
+        } else {
+            for (String part : USERS.split(",")) {
+                String[] ab = part.trim().split("-");
+                int a = Integer.parseInt(ab[0].trim());
+                int b = ab.length > 1 ? Integer.parseInt(ab[1].trim()) : a;
+                for (int u = a; u <= b; u++) {
+                    out.add(u);
+                }
+            }
+        }
+        return new java.util.ArrayList<>(out);
     }
 
     /** Timeslot (0..47) -> "HH:MM". */

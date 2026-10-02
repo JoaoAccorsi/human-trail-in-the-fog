@@ -281,6 +281,7 @@ From the project root, one terminal per service, **in this order**:
 cd cloud/tms && mvn -q compile exec:exec     # 1. TMS: wait for "[TMS] listening on http://localhost:8080"
 cd fog && mvn -q compile exec:exec           # 2. the 16 Fog nodes: wait for "you can run the Edge now"
 cd edge && mvn -q compile exec:exec          # 3. Edge: replays the user/day and exits
+deploy/run-users.sh 4000-5000 20            #    or: 1,001 users at once (one Edge process, summary at the end)
 source ~/.venvs/htf/bin/activate
 cd cloud/mobility-platform && streamlit run mobility_platform.py   # 4. platform: http://localhost:8501
 ```
@@ -439,6 +440,7 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
 | `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`data`) |
 | `HTF_USER`, `HTF_DAY`, `HTF_DATASET` | Edge | Simulated user (4005), day (20), dataset CSV |
+| `HTF_USERS`, `HTF_EDGE_THREADS` | Edge | Several users in one process, e.g. `4000-5000` or `4000,4005` (one simulated phone each, shared clock); publishing threads (32) |
 | `HTF_ENTRY_BROKER`, `HTF_PING_INTERVAL_MS` | Edge | Entry broker (`tcp://localhost:1901`), real time between pings (1000 ms) |
 | `HTF_START_DELAY_S`, `HTF_CONNECT_RETRY_S` | Edge | Wait before starting (0 s), keep retrying the broker for (0 s) |
 | `HTF_SALT` | Edge, platform | Pseudonym secret (`htf-dev-salt`) |
