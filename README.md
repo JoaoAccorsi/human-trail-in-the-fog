@@ -164,7 +164,7 @@ with two `ObjectEvent`s:
 | `bizLocation` (where: cell) | `urn:epc:id:sgln:0614141.{fog:05}.c{x}-{y}` (first cell) | last cell |
 | `bizStep` (why) | `arriving` | `departing` |
 | `action` | `OBSERVE` | `OBSERVE` |
-| `htf:*` extensions | day, slot, fogSize | + arrivalSlot, cells, pings, reason, nextFog |
+| `htf:*` extensions | day, slot, fogAreaSide | + arrivalSlot, cells, pings, reason, nextFog |
 
 `0614141` is the example GS1 Company Prefix of the GS1 standards. The TMS validates each document
 (400 if invalid), keeps it as received in `cloud/tms/data/epcis.jsonl` and derives the visit in
@@ -182,7 +182,7 @@ with two `ObjectEvent`s:
   "bizStep": "departing",
   "readPoint": {"id": "urn:epc:id:sgln:0614141.00002.0"},
   "bizLocation": {"id": "urn:epc:id:sgln:0614141.00002.c118-29"},
-  "htf:day": 20, "htf:slot": 26, "htf:fogSize": 50, "htf:arrivalSlot": 0,
+  "htf:day": 20, "htf:slot": 26, "htf:fogAreaSide": 50, "htf:arrivalSlot": 0,
   "htf:cells": [[98,24],[99,24],[98,24],[99,24],[98,24],[99,24],[96,24],[98,24],[106,26],[118,29]],
   "htf:pings": 15, "htf:reason": "handover", "htf:nextFog": 3
 }
@@ -431,6 +431,8 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | Variable | Component | Meaning (default) |
 |---|---|---|
 | `HTF_FOG_IDS`, `HTF_FOG_HOST`, `HTF_FOG_SEED` | Fog | Nodes to start (all), advertised host (`localhost`), seed URL (`http://localhost:9001`) |
+| `HTF_NUMBER_OF_FOGS` | Fog | Number of Fog nodes; the side of each area is computed from it (4, 16, 25, 64, 100, 400...; must be a perfect square whose root divides 200). Default 16 |
+| `HTF_FOG_AREA_SIDE` | Fog | Or the side of each node's area in cells; must divide 200 (50 = 16 nodes; 20 = 100 nodes; 10 = 400). Set only one of the two; clean the TMS data when you change it |
 | `HTF_TMS_URL` | Fog, platform | TMS address (`http://localhost:8080`) |
 | `HTF_HANDOVER`, `HTF_HOM_DB`, `HTF_TTT_MIN` | Fog | Handover policy (`rsrp`), HOM (3 dB), TTT (60 min) |
 | `HTF_TMS_BATCH_MAX`, `HTF_TMS_BATCH_WINDOW_MS` | Fog | Visits per EPCIS document sent to the TMS (500) and flush period (1000 ms) |

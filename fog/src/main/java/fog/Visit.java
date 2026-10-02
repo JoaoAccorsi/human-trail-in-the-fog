@@ -8,7 +8,7 @@ public class Visit {
     public String h;
     public int day;
     public int fog;
-    public int fogSize = Config.FOG_SIZE;
+    public int fogAreaSide = Config.FOG_AREA_SIDE;
     public int arrivalT;
     public int departureT;
     public String arrival;

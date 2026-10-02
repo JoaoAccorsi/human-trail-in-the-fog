@@ -78,9 +78,14 @@ def table(trail: list[dict]) -> list[dict]:
     } for i, v in enumerate(trail, 1)]
 
 
-def _area(fog: int, fog_size: int) -> tuple[float, float]:
-    per_axis = config.GRID // fog_size
-    return ((fog - 1) % per_axis) * fog_size + 0.5, ((fog - 1) // per_axis) * fog_size + 0.5
+def side_of(v: dict) -> int:
+    """Side of the Fog area (cells) of a visit; visits from older versions carry "fogSize"."""
+    return v.get("fogAreaSide") or v.get("fogSize")
+
+
+def _area(fog: int, area_side: int) -> tuple[float, float]:
+    per_axis = config.GRID // area_side
+    return ((fog - 1) % per_axis) * area_side + 0.5, ((fog - 1) // per_axis) * area_side + 0.5
 
 
 def trail_map(trail: list[dict], title: str):
@@ -93,13 +98,13 @@ def trail_map(trail: list[dict], title: str):
     colors = plt.cm.tab10.colors
     fig, ax = plt.subplots(figsize=(7, 7))
     # each visit carries the area size of the Fog that produced it
-    fogs = dict.fromkeys((v["fog"], v["fogSize"]) for v in trail)
-    for i, (fog, fog_size) in enumerate(fogs):
-        x0, y0 = _area(fog, fog_size)
-        ax.add_patch(Rectangle((x0, y0), fog_size, fog_size, alpha=0.25, color=colors[i % 10]))
+    fogs = dict.fromkeys((v["fog"], side_of(v)) for v in trail)
+    for i, (fog, area_side) in enumerate(fogs):
+        x0, y0 = _area(fog, area_side)
+        ax.add_patch(Rectangle((x0, y0), area_side, area_side, alpha=0.25, color=colors[i % 10]))
         # Fog name at the center of the visible part of the area (only if the area shows on the map)
-        vx0, vx1 = max(x0, x0v), min(x0 + fog_size, x1v)
-        vy0, vy1 = max(y0, y0v), min(y0 + fog_size, y1v)
+        vx0, vx1 = max(x0, x0v), min(x0 + area_side, x1v)
+        vy0, vy1 = max(y0, y0v), min(y0 + area_side, y1v)
         if vx0 < vx1 and vy0 < vy1:
             ax.text((vx0 + vx1) / 2, (vy0 + vy1) / 2, f"Fog {fog}", ha="center", va="center",
                     fontsize=11, alpha=0.6, weight="bold", clip_on=True)
@@ -201,14 +206,14 @@ def fog_map(people: list[dict], fog: int, title: str):
     colors = plt.cm.tab10.colors
     everything = [tuple(c) for p in people for v in p["trail"] for c in v["cells"]]
     xs, ys = [c[0] for c in everything], [c[1] for c in everything]
-    fog_size = people[0]["at_fog"][0]["fogSize"]
-    fx, fy = _area(fog, fog_size)
+    area_side = side_of(people[0]["at_fog"][0])
+    fx, fy = _area(fog, area_side)
     margin = 4
-    x0v, x1v = min(min(xs), fx) - margin, max(max(xs), fx + fog_size) + margin
-    y0v, y1v = min(min(ys), fy) - margin, max(max(ys), fy + fog_size) + margin
+    x0v, x1v = min(min(xs), fx) - margin, max(max(xs), fx + area_side) + margin
+    y0v, y1v = min(min(ys), fy) - margin, max(max(ys), fy + area_side) + margin
 
     fig, ax = plt.subplots(figsize=(7, 7))
-    visited = dict.fromkeys((v["fog"], v["fogSize"]) for p in people for v in p["trail"])
+    visited = dict.fromkeys((v["fog"], side_of(v)) for p in people for v in p["trail"])
     for f, size in visited:
         x0, y0 = _area(f, size)
         highlight = f == fog

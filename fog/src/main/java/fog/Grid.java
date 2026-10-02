@@ -3,7 +3,7 @@ package fog;
 /**
  * Split of the 200x200 grid into Fog node areas.
  * Same numbering as the notebook:
- *   fog = ((y-1) / FOG_SIZE) * (GRID / FOG_SIZE) + ((x-1) / FOG_SIZE) + 1
+ *   fog = ((y-1) / FOG_AREA_SIDE) * (GRID / FOG_AREA_SIDE) + ((x-1) / FOG_AREA_SIDE) + 1
  */
 public final class Grid {
 
@@ -11,20 +11,20 @@ public final class Grid {
     }
 
     public static int fogsPerAxis() {
-        return Config.GRID / Config.FOG_SIZE;
+        return Config.GRID / Config.FOG_AREA_SIDE;
     }
 
     /** Fog node responsible for cell (x, y). */
     public static int fogOfCell(int x, int y) {
-        return ((y - 1) / Config.FOG_SIZE) * fogsPerAxis() + ((x - 1) / Config.FOG_SIZE) + 1;
+        return ((y - 1) / Config.FOG_AREA_SIDE) * fogsPerAxis() + ((x - 1) / Config.FOG_AREA_SIDE) + 1;
     }
 
     /** {xMin, yMin, xMax, yMax} of the Fog node's area (inclusive). */
     public static int[] area(int fog) {
         int i = fog - 1;
-        int x0 = (i % fogsPerAxis()) * Config.FOG_SIZE + 1;
-        int y0 = (i / fogsPerAxis()) * Config.FOG_SIZE + 1;
-        return new int[] {x0, y0, x0 + Config.FOG_SIZE - 1, y0 + Config.FOG_SIZE - 1};
+        int x0 = (i % fogsPerAxis()) * Config.FOG_AREA_SIDE + 1;
+        int y0 = (i / fogsPerAxis()) * Config.FOG_AREA_SIDE + 1;
+        return new int[] {x0, y0, x0 + Config.FOG_AREA_SIDE - 1, y0 + Config.FOG_AREA_SIDE - 1};
     }
 
     /** Is the cell within the Fog node's reach (area + margin)? */

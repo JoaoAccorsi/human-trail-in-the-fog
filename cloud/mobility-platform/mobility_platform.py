@@ -82,7 +82,7 @@ if mode == USER_TRAIL:
         st.warning("No visits found. Run the Edge and the Fog for this user and day, "
                    "or widen the period (or check that the salt is the same as the Edge's).")
         st.stop()
-    if len({v["fogSize"] for v in trail}) > 1:
+    if len({tr.side_of(v) for v in trail}) > 1:
         st.warning(MIXED_VERSIONS_WARNING)
 
     s = tr.summary(trail)
@@ -122,7 +122,7 @@ else:
     if not people:
         st.warning(f"Nobody passed through Fog {fog} on day {day} (according to the visits in the TMS).")
         st.stop()
-    if len({v["fogSize"] for p in people for v in p["trail"]}) > 1:
+    if len({tr.side_of(v) for p in people for v in p["trail"]}) > 1:
         st.warning(MIXED_VERSIONS_WARNING)
 
     st.write(f"People who passed through **Fog {fog}** on day **{day}**.")

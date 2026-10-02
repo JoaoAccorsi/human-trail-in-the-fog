@@ -78,7 +78,7 @@ final class Epcis {
         e.add("bizLocation", id(sgln(v.fog, "c" + cell[0] + "-" + cell[1])));
         e.addProperty("htf:day", v.day);
         e.addProperty("htf:slot", slot);
-        e.addProperty("htf:fogSize", v.fogSize);
+        e.addProperty("htf:fogAreaSide", v.fogAreaSide);
         return e;
     }
 

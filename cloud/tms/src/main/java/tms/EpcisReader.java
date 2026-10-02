@@ -128,7 +128,7 @@ final class EpcisReader {
         v.addProperty("h", epc.substring(PSEUDONYM_PREFIX.length()));
         v.addProperty("day", num(departing, "htf:day"));
         v.addProperty("fog", Integer.parseInt(parts[1]));
-        v.addProperty("fogSize", num(departing, "htf:fogSize"));
+        v.addProperty("fogAreaSide", num(departing, departing.has("htf:fogAreaSide") ? "htf:fogAreaSide" : "htf:fogSize"));
         int arrivalT = num(arriving, "htf:slot");
         int departureT = num(departing, "htf:slot");
         v.addProperty("arrivalT", arrivalT);

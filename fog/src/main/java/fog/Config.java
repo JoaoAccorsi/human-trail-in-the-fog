@@ -6,8 +6,16 @@ public final class Config {
     // ------------------------------------------------------------------ topology
     /** YJMob100K grid: 200 x 200 cells of 500 m. */
     public static final int GRID = 200;
-    /** Side of each Fog node's area, in cells. 50 -> 16 Fog nodes of 25 x 25 km. */
-    public static final int FOG_SIZE = 50;
+    /**
+     * Side of each Fog node's area, in cells. It must divide GRID; the number of Fog nodes is
+     * (GRID / FOG_AREA_SIDE)^2:
+     *   100 -> 4 nodes, 50 -> 16 nodes of 25 x 25 km (default), 40 -> 25, 25 -> 64,
+     *   20 -> 100 nodes of 10 x 10 km, 10 -> 400.
+     * Set either HTF_NUMBER_OF_FOGS (number of Fog nodes; the side is computed from it) or
+     * HTF_FOG_AREA_SIDE (side in cells). If both are set they must agree.
+     * The Edge, the TMS and the platform need no change (each visit carries its fogAreaSide).
+     */
+    public static final int FOG_AREA_SIDE = fogAreaSide();
     /**
      * Extra reach of a Fog beyond its area, in cells. 0 = handover as soon as the
      * user leaves the area. Larger values avoid back-and-forth (ping-pong) handovers.
@@ -122,8 +130,57 @@ public final class Config {
     }
 
     public static int numberOfFogs() {
-        int perAxis = GRID / FOG_SIZE;
+        int perAxis = GRID / FOG_AREA_SIDE;
         return perAxis * perAxis;
+    }
+
+    /** Valid sides: divisors of GRID (the city must be split into whole squares). */
+    private static boolean validSide(int side) {
+        return side > 0 && side <= GRID && GRID % side == 0;
+    }
+
+    /** "4 (side 100), 16 (side 50), ..." for the error messages. */
+    private static String options() {
+        StringBuilder sb = new StringBuilder();
+        for (int side = GRID; side >= 1; side--) {
+            if (validSide(side) && GRID / side <= 40) {
+                int n = (GRID / side) * (GRID / side);
+                sb.append(sb.length() == 0 ? "" : ", ").append(n).append(" (side ").append(side).append(")");
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * HTF_NUMBER_OF_FOGS -> side = GRID / sqrt(count); the count must be a perfect square whose root
+     * divides GRID. HTF_FOG_AREA_SIDE -> used as is. Neither -> 50 (16 Fog nodes).
+     */
+    private static int fogAreaSide() {
+        String countEnv = env("HTF_NUMBER_OF_FOGS", "");
+        String sideEnv = env("HTF_FOG_AREA_SIDE", "");
+        Integer fromCount = null;
+        if (!countEnv.isBlank()) {
+            int count = Integer.parseInt(countEnv.trim());
+            int perAxis = (int) Math.round(Math.sqrt(count));
+            if (count <= 0 || perAxis * perAxis != count || GRID % perAxis != 0) {
+                throw new IllegalArgumentException("HTF_NUMBER_OF_FOGS=" + count + " is not possible: the "
+                        + GRID + "x" + GRID + " grid is split into equal squares, so use one of " + options());
+            }
+            fromCount = GRID / perAxis;
+        }
+        Integer fromSide = null;
+        if (!sideEnv.isBlank()) {
+            fromSide = Integer.parseInt(sideEnv.trim());
+            if (!validSide(fromSide)) {
+                throw new IllegalArgumentException("HTF_FOG_AREA_SIDE=" + fromSide + " must divide the grid side ("
+                        + GRID + "): use one of " + options());
+            }
+        }
+        if (fromCount != null && fromSide != null && !fromCount.equals(fromSide)) {
+            throw new IllegalArgumentException("HTF_NUMBER_OF_FOGS=" + countEnv + " means a side of " + fromCount
+                    + " cells, but HTF_FOG_AREA_SIDE=" + fromSide + "; set only one of them");
+        }
+        return fromCount != null ? fromCount : fromSide != null ? fromSide : 50;
     }
 
     private static String env(String name, String fallback) {

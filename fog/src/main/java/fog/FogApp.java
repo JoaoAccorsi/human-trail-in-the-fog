@@ -30,7 +30,7 @@ public class FogApp {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> nodes.forEach(FogNode::stop)));
 
         System.out.printf("[Fog   ] starting %d Fog node(s): %s | area of each node: %dx%d cells | TMS %s%n",
-                ids.size(), ids, Config.FOG_SIZE, Config.FOG_SIZE, Config.TMS_URL);
+                ids.size(), ids, Config.FOG_AREA_SIDE, Config.FOG_AREA_SIDE, Config.TMS_URL);
         // The seed node creates the ring; the others join through it.
         for (int id : ids) {
             FogNode n = new FogNode(id);
