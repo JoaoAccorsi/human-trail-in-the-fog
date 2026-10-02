@@ -197,6 +197,13 @@ with two `ObjectEvent`s:
   asks the TMS for the trail of `h`. It shows a map, a timeline, the visits and the EPCIS events.
 - **People at a Fog node:** the platform lists the nodes with visits on a day, then the pseudonyms
   that passed through the chosen node and their trails (where each person came from and went to).
+- **Whole city:** every visit of the day in one query; the map shades each Fog area by how many
+  people it served and draws trails on top, a table lists people, visits, pings and handovers per
+  node, and a timeline shows which node served each sampled person over the day.
+
+In the last two queries the charts show a **random sample** of the people ("People on the charts",
+10 by default, a new sample on each query; the metrics always count everyone). The map legend sits
+outside the axes (and is left out above 40 people, when the presence chart beside it names everyone).
 
 ### Privacy
 
@@ -243,7 +250,7 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `POST` | `/capture` | Fog | Receives a GS1 EPCIS 2.0 document with one visit or a batch (201 some new, 200 all repeated, 400 invalid) |
 | `GET` | `/events/{h}?day=20[&from=07:00&to=19:00][&toDay=21]` | CMP | EPCIS events of pseudonym `h` in the period, in time order |
 | `GET` | `/trail/{h}?day=20[&from=07:00&to=19:00][&toDay=21]` | CMP | Trail of `h` in the period: visits that overlap it, in arrival order |
-| `GET` | `/visits?fog=6&day=20` | CMP | Visits recorded by Fog 6 on day 20 |
+| `GET` | `/visits?day=20[&fog=6]` | CMP | Visits recorded on day 20 by Fog 6, or by every Fog node (whole city) without `fog` |
 | `GET` | `/fogs?day=20` | CMP | Fog nodes with visits on the day: `[{fog, people, visits}]` |
 | `GET` | `/health` | anyone | Is the TMS up? |
 
@@ -408,6 +415,7 @@ curl localhost:9008/status                   # Fog 8 on the ring: successor list
 curl localhost:8080/health                   # is the TMS up?
 curl 'localhost:8080/fogs?day=20'            # Fog nodes with visits on day 20
 curl 'localhost:8080/visits?fog=6&day=20'    # who passed through Fog 6 on day 20
+curl 'localhost:8080/visits?day=20'          # every visit of day 20 (whole city)
 curl "localhost:8080/events/$H?day=20"       # EPCIS events of pseudonym $H on day 20
 curl "localhost:8080/trail/$H?day=20&from=07:00&to=19:00"   # trail between 07:00 and 19:00
 ```

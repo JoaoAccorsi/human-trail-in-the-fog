@@ -59,14 +59,14 @@ public class TmsApp {
         return server;
     }
 
-    // ------------------------------------------------ POST /visits | GET /visits?fog=&day=
+    // ------------------------------------------------ GET /visits?day=[&fog=]
 
     private void visits(HttpExchange ex) throws IOException {
         if (!ex.getRequestMethod().equals("GET")) {
             respond(ex, 405, "{\"error\":\"use GET (Fogs send visits as EPCIS documents to POST /capture)\"}");
             return;
         }
-        visitsAtFog(ex);
+        visitsOfDay(ex);
     }
 
     // ------------------------------------------------ POST /capture (GS1 EPCIS 2.0)
@@ -167,9 +167,11 @@ public class TmsApp {
         return err.toString();
     }
 
-    // ------------------------------------------------ GET /visits?fog=F&day=N
+    // ------------------------------------------------ GET /visits?day=N[&fog=F]
 
-    private void visitsAtFog(HttpExchange ex) throws IOException {
+    /** Visits of a day recorded by Fog F, or by every Fog node when fog is absent (whole city). */
+
+    private void visitsOfDay(HttpExchange ex) throws IOException {
         Integer fog;
         Integer day;
         try {
@@ -179,14 +181,14 @@ public class TmsApp {
             respond(ex, 400, "{\"error\":\"fog and day must be numbers\"}");
             return;
         }
-        if (fog == null || day == null) {
-            respond(ex, 400, "{\"error\":\"provide fog and day: /visits?fog=6&day=20\"}");
+        if (day == null) {
+            respond(ex, 400, "{\"error\":\"provide the day (and optionally the Fog): /visits?day=20&fog=6\"}");
             return;
         }
-        List<JsonObject> list = repo.visitsAtFog(fog, day);
+        List<JsonObject> list = repo.visitsOfDay(fog, day);
         JsonArray arr = new JsonArray();
         list.forEach(arr::add);
-        System.out.printf("[TMS] Fog %d query day %d -> %d visits%n", fog, day, list.size());
+        System.out.printf("[TMS] %s query day %d -> %d visits%n", fog == null ? "city" : "Fog " + fog, day, list.size());
         respond(ex, 200, arr.toString());
     }
 

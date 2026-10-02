@@ -144,11 +144,11 @@ class Repository {
         return out;
     }
 
-    /** Visits recorded by a Fog node on a day, in arrival order. */
-    synchronized List<JsonObject> visitsAtFog(int fog, int day) throws IOException {
+    /** Visits recorded on a day by one Fog node (fog = null: by every Fog node), in arrival order. */
+    synchronized List<JsonObject> visitsOfDay(Integer fog, int day) throws IOException {
         List<JsonObject> out = new ArrayList<>();
         for (JsonObject v : read().values()) {
-            if (v.get("fog").getAsInt() == fog && v.get("day").getAsInt() == day) {
+            if ((fog == null || v.get("fog").getAsInt() == fog) && v.get("day").getAsInt() == day) {
                 out.add(v);
             }
         }

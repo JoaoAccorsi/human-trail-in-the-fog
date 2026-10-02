@@ -2,12 +2,14 @@
 
 import hashlib
 import hmac
+import random
 
 import matplotlib
 import requests
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.colors import Normalize  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 
 import config  # noqa: E402
@@ -117,7 +119,8 @@ def trail_map(trail: list[dict], title: str):
     ax.set_title(title)
     ax.set_xlabel("x (500 m cells)")
     ax.set_ylabel("y (500 m cells)")
-    ax.legend(loc="best")
+    # below the axes, so it never covers the trail
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=2, frameon=False)
     fig.tight_layout()
     return fig
 
@@ -152,29 +155,43 @@ def list_fogs(day: int, url: str = config.TMS_URL) -> list[dict]:
     return resp.json()
 
 
-def people_at_fog(fog: int, day: int, url: str = config.TMS_URL) -> list[dict]:
-    """Who passed through the Fog on the day. For each pseudonym: the visits to this Fog and the day's trail.
-    The platform only sees pseudonyms - without the salt and the uid there is no way to know who the person is."""
+def visits_at_fog(fog: int, day: int, url: str = config.TMS_URL) -> dict[str, list[dict]]:
+    """Visits the Fog recorded on the day, grouped by pseudonym (in order of first arrival)."""
     resp = requests.get(f"{url}/visits", params={"fog": fog, "day": day}, timeout=5)
     resp.raise_for_status()
     at_fog: dict[str, list[dict]] = {}
     for v in resp.json():
         at_fog.setdefault(v["h"], []).append(v)
-    people = []
-    for i, (h, visits) in enumerate(at_fog.items(), 1):
-        people.append({
-            "label": f"Person {i} ({h[:8]}…)",
-            "h": h,
-            "at_fog": visits,
-            "trail": fetch_trail(h, day, url),
-        })
-    return people
+    return at_fog
 
 
-def fog_summary(people: list[dict]) -> dict:
-    visits = [v for p in people for v in p["at_fog"]]
+def sample(people: dict[str, list[dict]], limit: int | None) -> list[str]:
+    """Up to `limit` pseudonyms chosen at random (all of them if limit is None or larger), kept in
+    order of first arrival. Each call draws a new sample."""
+    keys = list(people)
+    if limit is None or limit >= len(keys):
+        return keys
+    chosen = set(random.sample(keys, limit))
+    return [h for h in keys if h in chosen]
+
+
+def people_at_fog(at_fog: dict[str, list[dict]], chosen: list[str], day: int,
+                  url: str = config.TMS_URL) -> list[dict]:
+    """For each chosen pseudonym: the visits to the Fog and the day's trail (one TMS query each).
+    The platform only sees pseudonyms - without the salt and the uid there is no way to know who the person is."""
+    return [{
+        "label": f"Person {i} ({h[:8]}…)",
+        "h": h,
+        "at_fog": at_fog[h],
+        "trail": fetch_trail(h, day, url),
+    } for i, h in enumerate(chosen, 1)]
+
+
+def fog_summary(at_fog: dict[str, list[dict]]) -> dict:
+    """Totals over everyone who passed through the Fog (not only the sample on the charts)."""
+    visits = [v for vs in at_fog.values() for v in vs]
     return {
-        "people": len(people),
+        "people": len(at_fog),
         "visits": len(visits),
         "pings": sum(v["pings"] for v in visits),
         "start": min(v["arrival"] for v in visits),
@@ -201,9 +218,45 @@ def fog_table(people: list[dict], fog: int) -> list[dict]:
     return sorted(rows, key=lambda r: r["arrival"])
 
 
+# ====================================================================== shared by the multi-person charts
+
+LEGEND_MAX = 40  # above this, the map has no legend (the presence chart beside it names everyone)
+
+
+def _color(i: int):
+    return plt.cm.tab20.colors[(2 * i) % 20 + (i // 10) % 2]  # 20 distinct colors, strong ones first
+
+
+def _legend_columns(n: int) -> int:
+    return 0 if n > LEGEND_MAX else (1 if n <= 20 else 2)
+
+
+def _legend_width(n: int) -> float:
+    """Extra figure width (inches) for the legend outside the axes."""
+    return 2.4 * _legend_columns(n)
+
+
+def _legend_outside(fig, ax, n: int):
+    """Legend to the right of the axes, so it never covers the trails."""
+    cols = _legend_columns(n)
+    if cols:
+        ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1), borderaxespad=0, ncol=cols, fontsize=8,
+                  title="● start  ■ end", title_fontsize=8, frameon=False)
+
+
+def _plot_people(ax, people: list[dict]):
+    """Each person's trail: line through the cells, circle at the start, square at the end."""
+    for i, p in enumerate(people):
+        color = _color(i)
+        pts = [tuple(c) for v in p["trail"] for c in v["cells"]]
+        px, py = [c[0] for c in pts], [c[1] for c in pts]
+        ax.plot(px, py, "-o", color=color, markersize=3, linewidth=1.5, label=p["label"])
+        ax.plot(px[0], py[0], "o", color=color, markersize=9, markeredgecolor="white")    # start
+        ax.plot(px[-1], py[-1], "s", color=color, markersize=9, markeredgecolor="white")  # end
+
+
 def fog_map(people: list[dict], fog: int, title: str):
     """Map: the queried Fog highlighted, the other visited Fogs and each person's trail."""
-    colors = plt.cm.tab10.colors
     everything = [tuple(c) for p in people for v in p["trail"] for c in v["cells"]]
     xs, ys = [c[0] for c in everything], [c[1] for c in everything]
     area_side = side_of(people[0]["at_fog"][0])
@@ -212,7 +265,7 @@ def fog_map(people: list[dict], fog: int, title: str):
     x0v, x1v = min(min(xs), fx) - margin, max(max(xs), fx + area_side) + margin
     y0v, y1v = min(min(ys), fy) - margin, max(max(ys), fy + area_side) + margin
 
-    fig, ax = plt.subplots(figsize=(7, 7))
+    fig, ax = plt.subplots(figsize=(7 + _legend_width(len(people)), 7), layout="constrained")
     visited = dict.fromkeys((v["fog"], side_of(v)) for p in people for v in p["trail"])
     for f, size in visited:
         x0, y0 = _area(f, size)
@@ -226,28 +279,19 @@ def fog_map(people: list[dict], fog: int, title: str):
             ax.text(vx0 + 1, vy1 - 1, f"Fog {f}", ha="left", va="top", fontsize=10,
                     alpha=0.8 if highlight else 0.5, weight="bold", clip_on=True)
 
-    for i, p in enumerate(people):
-        color = colors[i % 10]
-        pts = [tuple(c) for v in p["trail"] for c in v["cells"]]
-        px, py = [c[0] for c in pts], [c[1] for c in pts]
-        ax.plot(px, py, "-o", color=color, markersize=3, linewidth=1.5, label=p["label"])
-        ax.plot(px[0], py[0], "o", color=color, markersize=9, markeredgecolor="white")    # start
-        ax.plot(px[-1], py[-1], "s", color=color, markersize=9, markeredgecolor="white")  # end
-
+    _plot_people(ax, people)
     ax.set_xlim(x0v, x1v)
     ax.set_ylim(y0v, y1v)
     ax.set_aspect("equal")
     ax.set_title(title)
     ax.set_xlabel("x (500 m cells)")
     ax.set_ylabel("y (500 m cells)")
-    ax.legend(loc="best", fontsize=8, title="● start  ■ end", title_fontsize=8)
-    fig.tight_layout()
+    _legend_outside(fig, ax, len(people))
     return fig
 
 
 def fog_presence(people: list[dict], fog: int):
     """Timeline: when each person was at the queried Fog (colored) and in the rest of the day (gray)."""
-    colors = plt.cm.tab10.colors
     fig, ax = plt.subplots(figsize=(9, 0.55 * len(people) + 1.6))
     for i, p in enumerate(people):
         for v in p["trail"]:
@@ -255,7 +299,7 @@ def fog_presence(people: list[dict], fog: int):
             duration = (v["departureT"] - v["arrivalT"] + 1) / 2
             here = v["fog"] == fog
             ax.barh(i, duration, left=start, height=0.6 if here else 0.3,
-                    color=colors[i % 10] if here else "#cccccc", edgecolor="white", linewidth=1)
+                    color=_color(i) if here else "#cccccc", edgecolor="white", linewidth=1)
     ax.set_yticks(range(len(people)), [p["label"] for p in people])
     ax.invert_yaxis()
     ax.set_xlim(0, 24)
@@ -264,4 +308,114 @@ def fog_presence(people: list[dict], fog: int):
     ax.grid(axis="x", alpha=0.3)
     ax.set_title(f"Presence at Fog {fog} (colored) and at other Fogs (gray)")
     fig.tight_layout()
+    return fig
+
+
+# ====================================================================== whole city on a day
+
+def day_trails(day: int, url: str = config.TMS_URL) -> dict[str, list[dict]]:
+    """Every visit of the day (all Fog nodes, one TMS query), grouped into one trail per pseudonym."""
+    resp = requests.get(f"{url}/visits", params={"day": day}, timeout=30)
+    resp.raise_for_status()
+    trails: dict[str, list[dict]] = {}
+    for v in sorted(resp.json(), key=lambda v: v["arrivalT"]):
+        trails.setdefault(v["h"], []).append(v)
+    return trails
+
+
+def city_people(trails: dict[str, list[dict]], chosen: list[str]) -> list[dict]:
+    return [{"label": f"Person {i} ({h[:8]}…)", "h": h, "trail": trails[h]} for i, h in enumerate(chosen, 1)]
+
+
+def city_summary(trails: dict[str, list[dict]]) -> dict:
+    visits = [v for t in trails.values() for v in t]
+    return {
+        "people": len(trails),
+        "visits": len(visits),
+        "pings": sum(v["pings"] for v in visits),
+        "handovers": sum(1 for v in visits if v["reason"] == "handover"),
+        "fogs": len({v["fog"] for v in visits}),
+    }
+
+
+def _people_per_fog(trails: dict[str, list[dict]]) -> dict[int, int]:
+    people: dict[int, set] = {}
+    for h, trail in trails.items():
+        for v in trail:
+            people.setdefault(v["fog"], set()).add(h)
+    return {f: len(hs) for f, hs in people.items()}
+
+
+def city_map(people: list[dict], trails: dict[str, list[dict]], title: str):
+    """Map of the whole city: every Fog area shaded by how many people passed through it on the day
+    (counting everyone), with the trails of the sampled people on top."""
+    area_side = side_of(next(iter(trails.values()))[0])
+    per_axis = config.GRID // area_side
+    counts = _people_per_fog(trails)
+    norm = Normalize(vmin=0, vmax=max(counts.values()))
+    cmap = plt.cm.YlOrRd
+    fig, ax = plt.subplots(figsize=(7 + _legend_width(len(people)), 7.8), layout="constrained")
+    label_size = max(5, 11 - per_axis // 2)
+    for f in range(1, per_axis * per_axis + 1):
+        x0, y0 = _area(f, area_side)
+        n = counts.get(f, 0)
+        ax.add_patch(Rectangle((x0, y0), area_side, area_side, facecolor=cmap(norm(n)), alpha=0.45,
+                               edgecolor="#999999", linewidth=0.6))
+        ax.text(x0 + area_side * 0.04, y0 + area_side * 0.96, f"Fog {f}\n{n}", ha="left", va="top",
+                fontsize=label_size, alpha=0.75, weight="bold")
+    _plot_people(ax, people)
+    lo, hi = 0.5 - 2, config.GRID + 0.5 + 2
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    ax.set_aspect("equal")
+    ax.set_title(title)
+    ax.set_xlabel("x (500 m cells)")
+    ax.set_ylabel("y (500 m cells)")
+    bar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax, location="bottom", shrink=0.6,
+                       aspect=40, pad=0.01)
+    bar.set_label("people who passed through the Fog")
+    _legend_outside(fig, ax, len(people))
+    return fig
+
+
+def city_table(trails: dict[str, list[dict]]) -> list[dict]:
+    """One row per Fog node: people, visits, pings and handovers that left / arrived."""
+    rows: dict[int, dict] = {}
+    for h, trail in trails.items():
+        for v in trail:
+            r = rows.setdefault(v["fog"], {"Fog": v["fog"], "people": set(), "visits": 0, "pings": 0,
+                                           "handovers out": 0, "handovers in": 0})
+            r["people"].add(h)
+            r["visits"] += 1
+            r["pings"] += v["pings"]
+            if v["reason"] == "handover" and v.get("nextFog"):
+                r["handovers out"] += 1
+                rows.setdefault(v["nextFog"], {"Fog": v["nextFog"], "people": set(), "visits": 0, "pings": 0,
+                                               "handovers out": 0, "handovers in": 0})["handovers in"] += 1
+    out = []
+    for f in sorted(rows):
+        r = dict(rows[f])
+        r["people"] = len(r["people"])
+        out.append(r)
+    return out
+
+
+def city_presence(people: list[dict]):
+    """Timeline of the sampled people: which Fog node served each one at each time of the day."""
+    fig, ax = plt.subplots(figsize=(14, 0.45 * len(people) + 1.6), layout="constrained")
+    for i, p in enumerate(people):
+        for v in p["trail"]:
+            start = v["arrivalT"] / 2
+            duration = (v["departureT"] - v["arrivalT"] + 1) / 2
+            ax.barh(i, duration, left=start, height=0.6, color=plt.cm.tab20.colors[(v["fog"] - 1) % 20],
+                    edgecolor="white", linewidth=1)
+            if duration >= 1:  # room for the Fog number inside the bar
+                ax.text(start + duration / 2, i, str(v["fog"]), ha="center", va="center", fontsize=7)
+    ax.set_yticks(range(len(people)), [p["label"] for p in people])
+    ax.invert_yaxis()
+    ax.set_xlim(0, 24)
+    ax.set_xticks(range(0, 25, 1), [f"{h:02d}h" for h in range(0, 25, 1)])
+    ax.set_xlabel("time of day")
+    ax.grid(axis="x", alpha=0.3)
+    ax.set_title("Fog node serving each sampled person over the day (number = Fog)")
     return fig
