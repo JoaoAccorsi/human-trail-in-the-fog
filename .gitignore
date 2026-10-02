@@ -4,6 +4,7 @@ YJMob100K/*.csv.gz
 YJMob100K/*.pdf
 # Outputs and generated data
 data/
+store-and-forward-queue/
 # Java
 target/
 # Python

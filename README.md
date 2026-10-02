@@ -438,7 +438,7 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_FOG_LANES` | Fog | Logic lanes per node: users are spread over this many threads by pseudonym; one user's pings stay in order (8) |
 | `HTF_OWNER_REFRESH_MS`, `HTF_OWNER_REFRESH_JITTER_MS` | Fog | Full republication of the owner records (300000 ms); random extra wait after a failure (2000 ms) |
 | `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
-| `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`data`) |
+| `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`store-and-forward-queue`, inside `fog/`) |
 | `HTF_USER`, `HTF_DAY`, `HTF_DATASET` | Edge | Simulated user (4005), day (20), dataset CSV |
 | `HTF_USERS`, `HTF_EDGE_THREADS` | Edge | Several users in one process, e.g. `4000-5000` or `4000,4005` (one simulated phone each, shared clock); publishing threads (32) |
 | `HTF_ENTRY_BROKER`, `HTF_PING_INTERVAL_MS` | Edge | Entry broker (`tcp://localhost:1901`), real time between pings (1000 ms) |
