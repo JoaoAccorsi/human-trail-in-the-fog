@@ -10,6 +10,8 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 COPY --from=build /src/target/classes ./classes
 COPY --from=build /src/target/lib ./lib
-# MQTT broker on 1900+N and HTTP API (Chord + handover) on 9000+N
+# Fog N: MQTT broker on 1900+N and HTTP API (Chord + handover) on 9000+N (ports 1901-1916 and
+# 9001-9016 with the default 16 nodes; on AWS the containers use the host network, so EXPOSE is only informative).
+# The store-and-forward queue is written to /app/store-and-forward-queue: mount a volume there.
 EXPOSE 1901-1916 9001-9016
 ENTRYPOINT ["java", "-Dorg.slf4j.simpleLogger.defaultLogLevel=warn", "-cp", "classes:lib/*", "fog.FogApp"]

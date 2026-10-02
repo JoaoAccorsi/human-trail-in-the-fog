@@ -15,7 +15,8 @@ terraform apply
 
 REGION="$(terraform output -raw region)"
 REGISTRY="$(terraform output -raw registry)"
-USERS="$(terraform output -json edge_users | tr -d '[] \n')"
+# every group joined with commas, e.g. ["4000-5000","6000,6005"] -> 4000-5000,6000,6005
+USERS="$(terraform output -json edge_groups | tr -d '[]" \n')"
 
 "$ROOT/deploy/extract-users.sh" "$USERS"
 
@@ -32,7 +33,8 @@ build edge edge
 cat <<MSG
 
 Images pushed. The instances pull them and start within a few minutes;
-the Edges wait a little longer so the Chord ring can form first.
+the Edges wait $(terraform output -raw edge_start_delay_s) s more so the Chord ring
+of $(terraform output -raw number_of_fogs) Fog nodes can form first.
 
   Cloud Mobility Platform: $(terraform output -raw cloud_mobility_platform_url)
   Logs (all nodes):        deploy/aws/logs.sh

@@ -3,9 +3,18 @@
 # Your public IP (https://checkip.amazonaws.com) followed by /32
 allowed_cidr = "203.0.113.10/32"
 
-region     = "us-east-1"
-edge_users = [4000, 4005]
-day        = 20
+region = "us-east-1"
+day    = 20
+
+# Fog nodes: n*n with 200 % n == 0 (1, 4, 16, 25, 64, 100, ...); one EC2 instance each
+number_of_fogs = 16
+
+# One Edge instance per element; each element lists users and ranges (HTF_USERS)
+edge_groups = ["4000,4005"]
+# edge_groups = ["4000-4999", "5000-5999"]   # 2000 users on 2 instances
+
+# edge_start_delay_s = 300   # default: 120 + 2 per Fog node
+# check_vcpu_quota   = false # skip the vCPU quota check
 
 # handover_policy = "area"   # baseline for comparison
 # hom_db          = 3

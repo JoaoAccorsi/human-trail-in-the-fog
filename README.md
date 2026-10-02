@@ -421,7 +421,8 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 
 - **Local, with Docker:** `deploy/extract-users.sh 4005 && docker compose up --build`, then open
   http://localhost:8501 (the 16 Fog nodes run in one container).
-- **AWS, one EC2 instance per node** (16 Fog nodes, TMS, platform and 2 Edges), created with
+- **AWS, one EC2 instance per node** (`number_of_fogs` Fog nodes, 16 by default, TMS, platform
+  and one Edge instance per group of users, each replaying many users), created with
   Terraform — see [deploy/aws/README.md](deploy/aws/README.md). `deploy/aws/up.sh` creates everything,
   `deploy/aws/crash-fog.sh N` simulates a node failure and `deploy/aws/down.sh` destroys everything.
 

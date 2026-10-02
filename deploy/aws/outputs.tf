@@ -17,8 +17,17 @@ output "region" {
   value = var.region
 }
 
-output "edge_users" {
-  value = var.edge_users
+output "edge_groups" {
+  description = "Users of each Edge instance (htf-edge-1, htf-edge-2, ...)."
+  value       = var.edge_groups
+}
+
+output "number_of_fogs" {
+  value = var.number_of_fogs
+}
+
+output "edge_start_delay_s" {
+  value = local.edge_start_delay_s
 }
 
 output "fog_private_ips" {
