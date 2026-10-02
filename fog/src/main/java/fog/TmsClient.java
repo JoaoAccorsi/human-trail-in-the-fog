@@ -49,8 +49,9 @@ import com.google.gson.JsonParser;
  */
 class TmsClient {
 
-    /** A queued visit: its own EPCIS document, a label for the log and the earliest sending time. */
-    private record Entry(String label, String document, long notBefore) {
+    /** A queued visit: its own EPCIS document, a label for the log, the earliest sending time and the
+     *  pseudonym (for the delivery measurement). */
+    private record Entry(String label, String document, long notBefore, String h) {
     }
 
     private final HttpClient http = HttpClient.newBuilder()
@@ -60,11 +61,13 @@ class TmsClient {
     private final URI url = URI.create(Config.TMS_URL + "/capture");
     private final Path outbox;
     private final int fogId;
+    private final Metrics metrics;
     private final ScheduledExecutorService sender = Executors.newSingleThreadScheduledExecutor();
     private boolean tmsDown;
 
-    TmsClient(int fogId) {
+    TmsClient(int fogId, Metrics metrics) {
         this.fogId = fogId;
+        this.metrics = metrics;
         this.outbox = Path.of(Config.DATA_DIR, "fog-" + fogId, "outbox.jsonl");
         sender.execute(this::load);
         sender.scheduleWithFixedDelay(this::flush, Config.TMS_BATCH_WINDOW_MS, Config.TMS_BATCH_WINDOW_MS,
@@ -79,7 +82,7 @@ class TmsClient {
     /** Hands the visit over; it is written to the queue now and sent no earlier than delayMs from now. */
     void send(Visit v, long delayMs) {
         Entry e = new Entry(String.format("Fog %d %s-%s", v.fog, v.arrival, v.departure),
-                FogApp.JSON.toJson(Epcis.document(v)), System.currentTimeMillis() + delayMs);
+                FogApp.JSON.toJson(Epcis.document(v)), System.currentTimeMillis() + delayMs, v.h);
         sender.execute(() -> {
             pending.addLast(e);
             append(e);
@@ -106,6 +109,10 @@ class TmsClient {
             }
             if (!post(batch)) {
                 break;
+            }
+            long confirmed = System.currentTimeMillis();
+            for (Entry e : batch) {    // from the moment the visit could be sent (jitter excluded) to the 2xx
+                metrics.record("tms_delivery", confirmed - e.notBefore(), e.h(), "batch=" + batch.size());
             }
             pending.removeAll(batch);
             changed = true;
@@ -185,7 +192,8 @@ class TmsClient {
                 }
                 JsonObject o = JsonParser.parseString(line).getAsJsonObject();
                 long notBefore = o.has("notBefore") ? o.get("notBefore").getAsLong() : 0;
-                pending.addLast(new Entry(o.get("label").getAsString(), o.get("document").toString(), notBefore));
+                pending.addLast(new Entry(o.get("label").getAsString(), o.get("document").toString(), notBefore,
+                        o.has("h") ? o.get("h").getAsString() : ""));
             }
             if (!pending.isEmpty()) {
                 System.out.printf("[Fog %2d] %d visit(s) recovered from %s; they will be resent to the TMS%n",
@@ -200,6 +208,7 @@ class TmsClient {
         JsonObject o = new JsonObject();
         o.addProperty("label", e.label());
         o.addProperty("notBefore", e.notBefore());
+        o.addProperty("h", e.h());
         o.add("document", JsonParser.parseString(e.document()));
         return o.toString();
     }

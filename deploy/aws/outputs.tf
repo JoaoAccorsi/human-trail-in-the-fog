@@ -33,3 +33,12 @@ output "edge_start_delay_s" {
 output "fog_private_ips" {
   value = local.fog_ip
 }
+
+output "results_bucket" {
+  description = "S3 bucket where deploy/aws/collect-metrics.sh gathers the results of a run."
+  value       = aws_s3_bucket.results.bucket
+}
+
+output "day" {
+  value = var.day
+}

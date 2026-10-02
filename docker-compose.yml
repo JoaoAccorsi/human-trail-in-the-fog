@@ -16,7 +16,7 @@ services:
       HTF_FOG_HOST: fog
       HTF_FOG_SEED: http://fog:9001
       HTF_TMS_URL: http://tms:8080
-    volumes: ["./store-and-forward-queue:/app/store-and-forward-queue"]
+    volumes: ["./store-and-forward-queue:/app/store-and-forward-queue", "./fog/metrics:/app/metrics"]
     depends_on: [tms]
 
   cmp:

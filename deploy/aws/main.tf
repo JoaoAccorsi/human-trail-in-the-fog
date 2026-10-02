@@ -162,6 +162,26 @@ resource "aws_iam_role_policy" "logs" {
   })
 }
 
+# Results of the experiments: deploy/aws/collect-metrics.sh has the Fog nodes and the TMS copy
+# their files here, then downloads them. terraform destroy also removes the bucket.
+resource "aws_s3_bucket" "results" {
+  bucket        = "htf-results-${data.aws_caller_identity.me.account_id}-${var.region}"
+  force_destroy = true
+}
+
+resource "aws_iam_role_policy" "results" {
+  name = "htf-results"
+  role = aws_iam_role.node.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["s3:PutObject"]
+      Resource = "${aws_s3_bucket.results.arn}/*"
+    }]
+  })
+}
+
 resource "aws_iam_instance_profile" "node" {
   name = "htf-node"
   role = aws_iam_role.node.name
@@ -194,9 +214,10 @@ resource "aws_instance" "fog" {
     name    = "fog-${each.key}"
     image   = "fog"
     restart = "unless-stopped"
-    # The store-and-forward queue (visits not yet confirmed by the TMS) lives on the instance,
-    # so it survives the container being removed by run.sh (restore-fog.sh, redeploy.sh).
-    volume = "-v /opt/htf/queue:/app/store-and-forward-queue"
+    # The store-and-forward queue (visits not yet confirmed by the TMS) and the evaluation
+    # measurements live on the instance, so they survive the container being removed by run.sh
+    # (restore-fog.sh, redeploy.sh). deploy/aws/collect-metrics.sh copies the measurements to S3.
+    volume = "-v /opt/htf/queue:/app/store-and-forward-queue -v /opt/htf/metrics:/app/metrics"
     env = {
       HTF_FOG_IDS        = each.key
       HTF_FOG_HOST       = each.value

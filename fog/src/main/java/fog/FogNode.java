@@ -108,13 +108,18 @@ final class FogNode {
     /** Lost ranges already received (broadcast deduplication), with the time they arrived. */
     private final Map<ChordNode.Range, Long> seenRanges = new HashMap<>();
     /** Owner-record writes and failure announcements: never on the users' lanes. */
+    private final Metrics metrics;
+    private final Map<String, Long> handoverStarted = new ConcurrentHashMap<>();  // h -> System.nanoTime()
+    private final Map<String, Double> prepareMs = new ConcurrentHashMap<>();      // h -> PREPARE round trip
+    private volatile long ringChangeAt;                                            // first unhandled report
     private final ExecutorService background = Executors.newSingleThreadExecutor();
 
     FogNode(int id) {
         this.id = id;
         this.ref = NodeRef.ofFog(id);
         this.chord = new ChordNode(ref, this::log);
-        this.tms = new TmsClient(id);
+        this.metrics = new Metrics(id);
+        this.tms = new TmsClient(id, metrics);
         for (int i = 0; i < lanes.length; i++) {
             lanes[i] = Executors.newSingleThreadExecutor();
         }
@@ -143,6 +148,8 @@ final class FogNode {
         timers.scheduleWithFixedDelay(() -> background.execute(() -> safely(() -> refreshOwnership(null, null))),
                 Config.OWNER_REFRESH_MS, Config.OWNER_REFRESH_MS, TimeUnit.MILLISECONDS);
         chord.onRingChange(range -> {
+            metrics.record("node_down", 0, null,
+                    "range=" + ChordNode.show(range.from()) + ".." + ChordNode.show(range.to()));
             scheduleOwnerRefresh(range, "my successor went down");
             background.execute(() -> safely(() -> announceRingChange(range)));
         });
@@ -151,8 +158,14 @@ final class FogNode {
         mqtt.setCallback(new MqttCallback() {
             @Override
             public void messageArrived(String topic, MqttMessage msg) {
+                long arrived = System.nanoTime();
                 Ping p = FogApp.JSON.fromJson(new String(msg.getPayload(), StandardCharsets.UTF_8), Ping.class);
-                lane(p.h).execute(() -> safely(() -> onPing(p)));
+                lane(p.h).execute(() -> {
+                    safely(() -> onPing(p));
+                    if (!"attach".equals(p.type)) {
+                        metrics.record("ping", Metrics.since(arrived), p.h, p.type == null ? "" : p.type);
+                    }
+                });
             }
 
             @Override
@@ -216,6 +229,7 @@ final class FogNode {
         }
         tms.stop();
         background.shutdownNow();
+        metrics.stop();
     }
 
     // =========================================================== logic (the user's lane)
@@ -350,8 +364,11 @@ final class FogNode {
         ctx.origin = ref;
         ctx.handovers++;
         ctx.triggerPing = p;
+        long started = System.nanoTime();
         try {
             FogCommunication.post(b.http + "/handover/prepare", ctx);                   // 1. PREPARE directly on Fog B
+            handoverStarted.put(p.h, started);
+            prepareMs.put(p.h, Metrics.since(started));
         } catch (IOException e) {
             log("PREPARE to Fog %d failed (%s); keeping the user here", target, e.getMessage());
             addresses.remove(target);
@@ -380,6 +397,7 @@ final class FogNode {
      */
     private void abortHandover(String h, NodeRef b, String why) {
         inHandover.remove(h);
+        recordHandover(h, b.fogId, "aborted");
         addresses.remove(b.fogId);
         Context ctx = contexts.get(h);
         log("HANDOVER of %s... to Fog %d aborted (%s); the user stays in Fog %d", brief(h), b.fogId, why, id);
@@ -420,6 +438,7 @@ final class FogNode {
     /** On the origin: the target confirmed; closes the visit and sends it to the TMS. */
     private void completeHandover(String h, int nextFog) {
         inHandover.remove(h);
+        recordHandover(h, nextFog, "committed");
         contexts.remove(h);
         Visit v = openVisits.remove(h);
         if (v != null) {
@@ -427,6 +446,16 @@ final class FogNode {
             v.nextFog = nextFog;
             log("COMMIT from Fog %d: handover complete; visit %s-%s -> TMS", nextFog, v.arrival, v.departure);
             tms.send(v);
+        }
+    }
+
+    /** Duration of a handover on the origin, from the decision to the COMMIT (or to the abort). */
+    private void recordHandover(String h, int target, String result) {
+        Long started = handoverStarted.remove(h);
+        Double prepare = prepareMs.remove(h);
+        if (started != null) {
+            metrics.record("handover", Metrics.since(started), h, String.format(java.util.Locale.ROOT,
+                    "to=%d;result=%s;prepare_ms=%.3f", target, result, prepare == null ? 0 : prepare));
         }
     }
 
@@ -577,6 +606,9 @@ final class FogNode {
      */
     private void scheduleOwnerRefresh(ChordNode.Range range, String reason) {
         synchronized (lostRanges) {
+            if (lostRanges.isEmpty()) {
+                ringChangeAt = System.currentTimeMillis();
+            }
             lostRanges.add(range);
         }
         if (refreshScheduled.compareAndSet(false, true)) {
@@ -615,6 +647,7 @@ final class FogNode {
         }
         if (records.isEmpty()) {
             if (reason != null) {
+                metrics.record("owner_refresh", System.currentTimeMillis() - ringChangeAt, null, "sent=0;restored=0");
                 log("OIDA: ring change (%s): none of my %d user(s) had the record on the failed node",
                         reason, contexts.size());
             }
@@ -664,6 +697,10 @@ final class FogNode {
                     FogCommunication.postAsync(old.http + "/handover/release", body);
                 }
             }
+        }
+        if (reason != null) {
+            metrics.record("owner_refresh", System.currentTimeMillis() - ringChangeAt, null,
+                    "sent=" + sent + ";restored=" + restored);
         }
         if (reason != null || restored > 0) {
             log("OIDA: owner records republished (%s): %d sent, %d written, %d restored",
@@ -857,6 +894,7 @@ final class FogNode {
             FogCommunication.respond(ex, 202, "{\"ok\":true}");
             Thread t = new Thread(() -> {
                 log("SIMULATED CRASH: broker, HTTP API and timers stopped without telling anyone");
+                metrics.record("crash", 0, null, "");
                 stop();
             });
             t.setDaemon(true);

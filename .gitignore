@@ -5,6 +5,9 @@ YJMob100K/*.pdf
 # Outputs and generated data
 data/
 store-and-forward-queue/
+metrics/
+results/
+deploy/aws/.run-start
 # Java
 target/
 # Python

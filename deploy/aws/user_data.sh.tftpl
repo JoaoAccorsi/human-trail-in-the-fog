@@ -3,7 +3,7 @@
 set -euxo pipefail
 dnf install -y docker
 systemctl enable --now docker
-mkdir -p /opt/htf/data /opt/htf/queue
+mkdir -p /opt/htf/data /opt/htf/queue /opt/htf/metrics
 
 cat > /opt/htf/run.sh <<'RUN'
 #!/bin/bash

@@ -405,6 +405,37 @@ Not recovered in this version: the contexts and open visits in the failed node's
 go back to the entry broker and are taken over by the node of their cell.
 Visits already sent to the TMS are safe.
 
+### Evaluation metrics
+
+Each Fog node writes its measurements to `fog/metrics/fog-{id}.csv`
+(`time_ms,fog,event,value_ms,h,detail`):
+
+| Event | What is measured |
+|---|---|
+| `ping` | Arrival of the ping (MQTT) to the end of its processing: lane queue + handover logic |
+| `handover` | On the origin, from the handover decision to the COMMIT (or the abort); `detail` has the target, the result and the PREPARE round trip |
+| `tms_delivery` | From the moment a visit may be sent (end-of-day jitter excluded) until the TMS confirms it |
+| `node_down` | The node detected that its successor on the ring failed |
+| `owner_refresh` | Owner records republished after a ring change: time since the change was reported, records restored |
+| `crash` | Simulated crash of the node (`/admin/crash`) |
+
+`deploy/metrics.py` joins them with the visits stored by the TMS and appends one row per metric to
+**`results/metrics.csv`** (`run,scope,metric,value,unit`), for the whole city and for each Fog node:
+people, visits, pings stored and expected (ping delivery ratio), Fog handovers, ping-pongs (return
+to the previous Fog within 60 min), visit duration, how the visits ended, overlapping visits, load per
+Fog (and max/mean imbalance), the count/mean/p50/p95/max of the ping processing, handover, PREPARE
+and TMS delivery times, aborted handovers, and, with a failure, the detection time and the owner
+records restored. Every run is appended under its own label, so the scenarios can be compared in
+one file.
+
+`deploy/run-users.sh` calls it at the end of the run (label: `LABEL=c1-rsrp deploy/run-users.sh`,
+default `users-<range>-day<day>`), counting only the measurements made since the run started. Use
+`CLEAN=1`, so the TMS data holds only this run. By hand:
+
+```bash
+python3 deploy/metrics.py --label c1-area --users 4000-5000 --dataset YJMob100K/yjmob100k-dataset2.csv
+```
+
 ### Stopping and useful commands
 
 `Ctrl+C` in each terminal. The data stays in `cloud/tms/data/epcis.jsonl` and `visits.jsonl`;
@@ -450,6 +481,7 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_OWNER_REFRESH_MS`, `HTF_OWNER_REFRESH_JITTER_MS` | Fog | Full republication of the owner records (300000 ms); random extra wait after a failure (2000 ms) |
 | `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
 | `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`store-and-forward-queue`, inside `fog/`) |
+| `HTF_METRICS_DIR` | Fog | Folder of the evaluation measurements, `{dir}/fog-{id}.csv` (`metrics`, inside `fog/`) |
 | `HTF_USER`, `HTF_DAY`, `HTF_DATASET` | Edge | Simulated user (4005), day (20), dataset CSV |
 | `HTF_USERS`, `HTF_EDGE_THREADS` | Edge | Several users in one process, e.g. `4000-5000` or `4000,4005` (one simulated phone each, shared clock); publishing threads (32) |
 | `HTF_ENTRY_BROKER`, `HTF_PING_INTERVAL_MS` | Edge | Entry broker (`tcp://localhost:1901`), real time between pings (1000 ms) |

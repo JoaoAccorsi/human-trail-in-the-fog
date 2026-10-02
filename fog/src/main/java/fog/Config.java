@@ -111,6 +111,8 @@ public final class Config {
     public static final int FOG_LANES = Integer.parseInt(env("HTF_FOG_LANES", "8"));
     /** Folder of each node's persistent store-and-forward queue: {DATA_DIR}/fog-{id}/outbox.jsonl. */
     public static final String DATA_DIR = env("HTF_FOG_DATA", "store-and-forward-queue");
+    /** Folder of the evaluation measurements: {METRICS_DIR}/fog-{id}.csv (see Metrics and deploy/metrics.py). */
+    public static final String METRICS_DIR = env("HTF_METRICS_DIR", "metrics");
     /**
      * Visits are sent to the TMS in batches: one EPCIS document with the events of up to
      * TMS_BATCH_MAX visits, flushed every TMS_BATCH_WINDOW_MS (or as soon as a batch is full).

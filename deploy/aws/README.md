@@ -13,7 +13,7 @@ user of its group. Every instance runs a single Docker container pulled from Ama
 | Trail Management Service | EC2 `t4g.small` `htf-tms`, `10.20.0.5`; JSONL files in `/opt/htf/data` on the instance |
 | Cloud Mobility Platform | EC2 `t4g.small` `htf-cmp`, `10.20.0.6`, the only port open to the internet (8501, your IP only) |
 | Edge simulator (one per group of users) | EC2 `t4g.small` `htf-edge-1`, `htf-edge-2`, ... at `10.20.0.(9+i)`; tag `Users` lists its users |
-| Images / logs / access | ECR, CloudWatch Logs group `/htf`, Systems Manager (SSM) |
+| Images / logs / access / results | ECR, CloudWatch Logs group `/htf`, Systems Manager (SSM), S3 bucket `htf-results-<account>-<region>` (measurements of each run) |
 
 All instances are Graviton (ARM64), run Amazon Linux 2023 and sit in one `/20` subnet. They
 share one security group that only accepts traffic from its own members.
@@ -59,8 +59,9 @@ prints the address of the Cloud Mobility Platform.
 | Command | What it does |
 |---|---|
 | `deploy/aws/logs.sh` / `deploy/aws/logs.sh fog-7` | Follows the logs of all nodes / of one node |
-| `deploy/aws/run-edges.sh` | Replays the day again on every Edge |
-| `deploy/aws/crash-fog.sh 7` | Abrupt failure of Fog 7 (kills its container, no warning) |
+| `deploy/aws/run-edges.sh` | Replays the day again on every Edge (and marks the start of a new run) |
+| `deploy/aws/crash-fog.sh 7` | Abrupt failure of Fog 7 (kills its container, no warning); the time goes to `results/crash-times.csv` |
+| `deploy/aws/collect-metrics.sh c2-5000` | After the Edges finish: gathers the measurements of the Fog nodes and the visits of the TMS (through the S3 bucket `results_bucket`) into `results/aws/c2-5000/` and appends the metrics of the run to `results/metrics.csv` |
 | `deploy/aws/restore-fog.sh 7` | Starts Fog 7 again; it rejoins the ring and sends the visits left in its store-and-forward queue (`/opt/htf/queue` survives the container) |
 | `deploy/aws/redeploy.sh` | After changing the code: rebuilds, pushes and restarts every container |
 | `deploy/aws/ssm.sh tag:Name htf-tms "<cmd>"` | Runs any shell command on the selected instances |

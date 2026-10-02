@@ -6,8 +6,12 @@
 #
 #   deploy/run-users.sh                    # users 4000-5000, day 20
 #   deploy/run-users.sh 4000-4100 20       # other range / day
-#   CLEAN=1 deploy/run-users.sh            # move the TMS data aside first (fresh results)
+#   CLEAN=1 deploy/run-users.sh            # delete the TMS data first (fresh results)
 #   HTF_PING_INTERVAL_MS=3000 deploy/run-users.sh   # slower clock (real time per 30-min slot)
+#   LABEL=c1-rsrp deploy/run-users.sh      # label of the run in results/metrics.csv
+#
+# At the end, the metrics of the run (trails in the TMS + measurements of the Fog nodes since the
+# start of the run) are appended to results/metrics.csv by deploy/metrics.py.
 #
 # Start the TMS and the Fog nodes first:
 #   cd cloud/tms && mvn -q compile exec:exec
@@ -26,16 +30,15 @@ curl -fsS "$TMS/health" >/dev/null 2>&1 || { echo "The TMS is not answering at $
 curl -fsS "http://localhost:9001/status" >/dev/null 2>&1 || { echo "Fog 1 is not answering. Start the Fog nodes: cd fog && mvn -q compile exec:exec"; exit 1; }
 
 if [ "${CLEAN:-0}" = "1" ]; then
-  OLD="$ROOT/cloud/tms/data/old-$(date +%Y%m%d-%H%M%S)"
-  mkdir -p "$OLD"
-  mv "$ROOT"/cloud/tms/data/*.jsonl "$OLD"/ 2>/dev/null || true
-  echo "Previous TMS data moved to $OLD"
+  rm -f "$ROOT/cloud/tms/data/visits.jsonl" "$ROOT/cloud/tms/data/epcis.jsonl"
+  echo "Previous TMS data deleted (cloud/tms/data/visits.jsonl and epcis.jsonl)"
 fi
 
 export HTF_USERS="$USERS" HTF_DAY="$DAY"
 export HTF_PING_INTERVAL_MS="${HTF_PING_INTERVAL_MS:-2000}"
 echo "Replaying users $USERS on day $DAY (one 30-min slot every ${HTF_PING_INTERVAL_MS} ms)..."
 START=$(date +%s)
+START_MS=$(python3 -c 'import time; print(int(time.time() * 1000))')
 (cd "$ROOT/edge" && mvn -q compile exec:exec)
 echo "Edge finished in $(( $(date +%s) - START )) s."
 
@@ -58,3 +61,13 @@ print("%4s %7d %7d   (a person is counted once per Fog)" % ("all", sum(r["people
 echo
 echo "Consistency of the trails (no person served by two Fog nodes at the same time):"
 python3 "$ROOT/deploy/check-trails.py" "$ROOT/cloud/tms/data/visits.jsonl" "$DAY" || true
+
+echo
+echo "Metrics of the run:"
+DATASET="$ROOT/YJMob100K/yjmob100k-dataset2.csv"
+[ -f "$DATASET" ] || DATASET="$DATASET.gz"
+EXTRA=()                                    # an array keeps paths with spaces (e.g. iCloud Drive) whole
+[ -f "$DATASET" ] && EXTRA=(--dataset "$DATASET")
+python3 "$ROOT/deploy/metrics.py" --label "${LABEL:-users-$USERS-day$DAY}" --day "$DAY" --since "$START_MS" \
+  --visits "$ROOT/cloud/tms/data/visits.jsonl" --fog-metrics "$ROOT/fog/metrics" \
+  --users "$USERS" ${EXTRA[@]+"${EXTRA[@]}"} || true
