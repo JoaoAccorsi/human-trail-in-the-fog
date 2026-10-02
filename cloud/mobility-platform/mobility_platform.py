@@ -100,7 +100,7 @@ if mode == USER_TRAIL:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Pings", s["pings"])
     c2.metric("Fog nodes visited", s["fogs"])
-    c3.metric("Handovers", s["handovers"])
+    c3.metric("Fog handovers", s["handovers"])
     c4.metric("Period", f"{s['start']} – {s['end']}")
 
     left, right = st.columns([1, 1])
@@ -176,9 +176,9 @@ else:
     s = tr.city_summary(trails)
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("People", s["people"])
-    c2.metric("Visits", s["visits"])
+    c2.metric("Total visits", s["visits"])
     c3.metric("Pings", s["pings"])
-    c4.metric("Handovers", s["handovers"])
+    c4.metric("Fog handovers", s["handovers"])
     c5.metric("Fog nodes with visits", s["fogs"])
 
     left, right = st.columns([1, 1])

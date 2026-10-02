@@ -220,11 +220,32 @@ def fog_table(people: list[dict], fog: int) -> list[dict]:
 
 # ====================================================================== shared by the multi-person charts
 
-LEGEND_MAX = 40  # above this, the map has no legend (the presence chart beside it names everyone)
+LEGEND_MAX = 40  # above this, the map has no legend (the presence chart beside it names the people)
+LABELS_MAX = 60  # above this, the presence charts name only every k-th person and keep a fixed height
 
 
 def _color(i: int):
     return plt.cm.tab20.colors[(2 * i) % 20 + (i // 10) % 2]  # 20 distinct colors, strong ones first
+
+
+def _presence_height(n: int, per_row: float) -> float:
+    """Height (inches) of a presence chart: one row per person, but never taller than 24 inches, so a
+    sample of hundreds of people does not become an image too large to render."""
+    return min(per_row * n + 1.6, 24)
+
+
+def _bar_style(n: int) -> tuple[float, float]:
+    """Bar height factor and white edge width: with many people the rows are thin, so the bars fill
+    the row and drop the edge (otherwise the edge hides the color)."""
+    return (1.5, 0) if n > LABELS_MAX else (1, 1)
+
+
+def _presence_labels(ax, people: list[dict]):
+    """Person names on the y axis; with many people, only every k-th one (the others stay unlabeled)."""
+    step = max(1, -(-len(people) // LABELS_MAX))
+    rows = range(0, len(people), step)
+    ax.set_yticks(list(rows), [people[i]["label"] for i in rows], fontsize=8 if step == 1 else 7)
+    ax.set_ylim(len(people) - 0.5, -0.5)  # first person on top
 
 
 def _legend_columns(n: int) -> int:
@@ -292,16 +313,16 @@ def fog_map(people: list[dict], fog: int, title: str):
 
 def fog_presence(people: list[dict], fog: int):
     """Timeline: when each person was at the queried Fog (colored) and in the rest of the day (gray)."""
-    fig, ax = plt.subplots(figsize=(9, 0.55 * len(people) + 1.6))
+    fig, ax = plt.subplots(figsize=(9, _presence_height(len(people), 0.55)))
+    thin, edge = _bar_style(len(people))
     for i, p in enumerate(people):
         for v in p["trail"]:
             start = v["arrivalT"] / 2
             duration = (v["departureT"] - v["arrivalT"] + 1) / 2
             here = v["fog"] == fog
-            ax.barh(i, duration, left=start, height=0.6 if here else 0.3,
-                    color=_color(i) if here else "#cccccc", edgecolor="white", linewidth=1)
-    ax.set_yticks(range(len(people)), [p["label"] for p in people])
-    ax.invert_yaxis()
+            ax.barh(i, duration, left=start, height=(0.6 if here else 0.3) * thin,
+                    color=_color(i) if here else "#cccccc", edgecolor="white", linewidth=edge)
+    _presence_labels(ax, people)
     ax.set_xlim(0, 24)
     ax.set_xticks(range(0, 25, 2), [f"{h:02d}h" for h in range(0, 25, 2)])
     ax.set_xlabel("time of day")
@@ -402,17 +423,17 @@ def city_table(trails: dict[str, list[dict]]) -> list[dict]:
 
 def city_presence(people: list[dict]):
     """Timeline of the sampled people: which Fog node served each one at each time of the day."""
-    fig, ax = plt.subplots(figsize=(14, 0.45 * len(people) + 1.6), layout="constrained")
+    fig, ax = plt.subplots(figsize=(14, _presence_height(len(people), 0.45)), layout="constrained")
+    thin, edge = _bar_style(len(people))
     for i, p in enumerate(people):
         for v in p["trail"]:
             start = v["arrivalT"] / 2
             duration = (v["departureT"] - v["arrivalT"] + 1) / 2
-            ax.barh(i, duration, left=start, height=0.6, color=plt.cm.tab20.colors[(v["fog"] - 1) % 20],
-                    edgecolor="white", linewidth=1)
-            if duration >= 1:  # room for the Fog number inside the bar
+            ax.barh(i, duration, left=start, height=0.6 * thin, color=plt.cm.tab20.colors[(v["fog"] - 1) % 20],
+                    edgecolor="white", linewidth=edge)
+            if duration >= 1 and len(people) <= LABELS_MAX:  # room for the Fog number inside the bar
                 ax.text(start + duration / 2, i, str(v["fog"]), ha="center", va="center", fontsize=7)
-    ax.set_yticks(range(len(people)), [p["label"] for p in people])
-    ax.invert_yaxis()
+    _presence_labels(ax, people)
     ax.set_xlim(0, 24)
     ax.set_xticks(range(0, 25, 1), [f"{h:02d}h" for h in range(0, 25, 1)])
     ax.set_xlabel("time of day")
