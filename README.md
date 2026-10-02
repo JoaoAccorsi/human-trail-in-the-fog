@@ -231,7 +231,7 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `POST` | `/handover/transfer` | A node asks for the context of a user who reappeared there |
 | `POST` | `/handover/release` | Another node now owns the user: close the visit and drop the context |
 | `POST` | `/handover/cancel` | The origin aborted the handover (no COMMIT in time): drop the PREPARE |
-| `POST` | `/ring/changed` | Keys `(from, to]` were lost with a failed node: republish the owner records in that range |
+| `POST` | `/ring/changed` | Broadcast: keys `(from, to]` were lost with a failed node; republish the owner records in that range and forward to the fingers in `(me, limit)` |
 | `POST` | `/dht/claims` | Conditional put of many ownership records stored on this node (one request per node) |
 | `GET` | `/status` | Successor list, predecessor and finger table (debugging) |
 | `POST` | `/admin/crash` | Simulates a crash (stops broker, API and timers without warning anyone) |
@@ -356,10 +356,20 @@ sequenceDiagram
     F15->>F15: predecessor = Fog 6 — ring repaired
 ```
 
+**64-bit identifiers.** Nodes and keys are placed on the ring by the first 64 bits of their SHA-1
+(unsigned longs). With 16 bits (65,536 positions), a ring of 1,000 nodes would already have about 8
+pairs of nodes sharing an identifier (birthday paradox, ~N^2 / 2^17); with 64 bits collisions are
+negligible even for millions of nodes. The finger table has 64 entries; consecutive fingers that
+point to the same node are filled with a single lookup.
+
 **Owner records after a failure.** The `h:{pseudonym}` records stored on the failed node are lost
 with it, but they come back. The predecessor of the failed node knows exactly which keys were
-there, the range (predecessor, failed node], and announces that range to all the nodes
-(`/ring/changed`). Every node then republishes **only** the records of its users whose key falls in
+there, the range (predecessor, failed node], and **broadcasts** that range over the finger tables
+(`/ring/changed`, El-Ansary et al., IPTPS 2003): each node forwards it to its fingers, each finger
+being responsible for the interval up to the next one, so every live node receives it exactly once,
+with N - 1 messages, depth O(log N) and no lookup of addresses (the `fog:{id}` records of some
+nodes may have been lost with the failed node). If a finger does not answer, the next live node
+takes its interval. Every node then republishes **only** the records of its users whose key falls in
 that range, 1 to 3 s later (random jitter, so the nodes do not write at the same instant), on a
 background thread (pings and handovers never wait), with one request per responsible node
 (`/dht/claims`). The conditional write recreates the lost records on the node that inherited the

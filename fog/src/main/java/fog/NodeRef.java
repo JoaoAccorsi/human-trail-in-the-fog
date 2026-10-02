@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** Reference to a Fog node on the network: position on the Chord ring and addresses. */
 public class NodeRef {
-    public int id;          // position on the Chord ring (0 .. 2^CHORD_BITS - 1)
+    public long id;         // position on the Chord ring (0 .. 2^CHORD_BITS - 1, read as unsigned)
     public int fogId;       // Fog node number (1..16)
     public String http;     // node API: http://host:900N
     public String mqtt;     // node broker: tcp://host:190N

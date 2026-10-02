@@ -55,8 +55,9 @@ import com.sun.net.httpserver.HttpServer;
  *     Fog that wins over an unexpected owner tells it to do so (POST /handover/release);
  *   - a stale open visit is never extended: it is closed before a new stay starts;
  *   - a record lost with a failed node comes back on the node that inherited its keys: the
- *     predecessor of the failed node tells all the others the lost range of keys
- *     (POST /ring/changed), and every node republishes only the records of its users that fall
+ *     predecessor of the failed node broadcasts the lost range of keys over the finger tables
+ *     (POST /ring/changed, each node forwards it inside its interval), and every node
+ *     republishes only the records of its users that fall
  *     in that range, after a random delay, off the logic thread and grouped by responsible
  *     node. All records are also republished every OWNER_REFRESH_MS (safety net).
  *
@@ -67,7 +68,8 @@ import com.sun.net.httpserver.HttpServer;
  *   POST /handover/transfer {h, nextFog}      -> 200 {Context} | 404  (user reappeared in another Fog)
  *   POST /handover/release  {h, nextFog}      -> 202  (another Fog now owns the user: close and drop)
  *   POST /handover/cancel   {h}               -> 202  (the origin aborted the handover: drop the PREPARE)
- *   POST /ring/changed      {fog, from, to}   -> 202  (keys (from, to] were lost: republish mine there)
+ *   POST /ring/changed      {fog, from, to, limit} -> 202  (keys (from, to] were lost: republish mine
+ *                                                    there and forward to my fingers in (me, limit))
  *   GET  /status                              -> node and ring state
  *   POST /admin/crash                         -> simulates a crash of this node (for failure tests)
  */
@@ -96,6 +98,8 @@ final class FogNode {
     private final AtomicBoolean refreshScheduled = new AtomicBoolean(false);
     /** Lost key ranges waiting for the next targeted refresh (guarded by itself). */
     private final List<ChordNode.Range> lostRanges = new ArrayList<>();
+    /** Lost ranges already received (broadcast deduplication), with the time they arrived. */
+    private final Map<ChordNode.Range, Long> seenRanges = new HashMap<>();
     /** Owner-record writes and failure announcements: never on the logic thread. */
     private final ExecutorService background = Executors.newSingleThreadExecutor();
 
@@ -155,8 +159,8 @@ final class FogNode {
         options.setCleanSession(true);
         mqtt.connect(options);
         mqtt.subscribe(new String[] {Config.PINGS_TOPIC}, new int[] {Config.QOS});
-        log("up | area x=%s y=%s | broker %s | API %s | Chord ring id=%d",
-                range(0), range(1), ref.mqtt, ref.http, ref.id);
+        log("up | area x=%s y=%s | broker %s | API %s | Chord ring id=%s",
+                range(0), range(1), ref.mqtt, ref.http, ChordNode.show(ref.id));
     }
 
     private void joinRing() throws InterruptedException {
@@ -596,7 +600,7 @@ final class FogNode {
         }));
     }
 
-    private static boolean inRanges(int key, List<ChordNode.Range> ranges) {
+    private static boolean inRanges(long key, List<ChordNode.Range> ranges) {
         if (ranges == null) {
             return true;
         }
@@ -642,26 +646,29 @@ final class FogNode {
     }
 
     /**
-     * Only the neighbors of a failed node notice the failure: its predecessor tells all the other
-     * nodes which range of keys was lost (background thread).
+     * Only the neighbors of a failed node notice the failure: its predecessor broadcasts the lost
+     * range of keys over the finger tables (background thread). No address lookup is needed, so
+     * nodes whose "fog:{id}" record was lost with the failed node are reached as well.
      */
     private void announceRingChange(ChordNode.Range range) {
-        JsonObject body = new JsonObject();
-        body.addProperty("fog", id);
-        body.addProperty("from", range.from());
-        body.addProperty("to", range.to());
-        int told = 0;
-        for (int other = 1; other <= Config.numberOfFogs(); other++) {
-            if (other == id) {
-                continue;
-            }
-            NodeRef r = resolveFog(other);
-            if (r != null) {
-                FogCommunication.postAsync(r.http + "/ring/changed", body);
-                told++;
-            }
+        JsonObject payload = new JsonObject();
+        payload.addProperty("fog", id);
+        payload.addProperty("from", range.from());
+        payload.addProperty("to", range.to());
+        seenAnnouncement(range);
+        int sent = chord.broadcast("/ring/changed", payload);
+        log("OIDA: lost key range (%s, %s] broadcast over the finger tables (%d direct send(s))",
+                ChordNode.show(range.from()), ChordNode.show(range.to()), sent);
+    }
+
+    /** true the first time a lost range is seen (the broadcast reaches each node once; this guards
+     *  against repeats while finger tables are still inconsistent). */
+    private boolean seenAnnouncement(ChordNode.Range range) {
+        long now = System.currentTimeMillis();
+        synchronized (seenRanges) {
+            seenRanges.values().removeIf(t -> now - t > 60_000);
+            return seenRanges.putIfAbsent(range, now) == null;
         }
-        log("OIDA: lost key range (%d, %d] announced to %d node(s)", range.from(), range.to(), told);
     }
 
     /** End of the day: the record stays on the ring, but marked as released (fog 0). */
@@ -781,9 +788,18 @@ final class FogNode {
         });
         http.createContext("/ring/changed", ex -> {
             JsonObject b = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject();
-            ChordNode.Range range = new ChordNode.Range(b.get("from").getAsInt(), b.get("to").getAsInt());
-            scheduleOwnerRefresh(range, "Fog " + b.get("fog").getAsInt() + " reported a node down");
+            ChordNode.Range range = new ChordNode.Range(b.get("from").getAsLong(), b.get("to").getAsLong());
+            long limit = b.get("limit").getAsLong();
             FogCommunication.respond(ex, 202, null);
+            if (!seenAnnouncement(range)) {
+                return;                                   // already received (and forwarded)
+            }
+            scheduleOwnerRefresh(range, "Fog " + b.get("fog").getAsInt() + " reported a node down");
+            JsonObject payload = new JsonObject();
+            payload.add("fog", b.get("fog"));
+            payload.add("from", b.get("from"));
+            payload.add("to", b.get("to"));
+            background.execute(() -> safely(() -> chord.forward("/ring/changed", payload, limit)));
         });
         http.createContext("/handover/cancel", ex -> {
             String h = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject().get("h").getAsString();

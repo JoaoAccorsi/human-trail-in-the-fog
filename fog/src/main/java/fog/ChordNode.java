@@ -1,6 +1,7 @@
 package fog;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -25,7 +26,8 @@ import com.sun.net.httpserver.HttpServer;
 /**
  * OIDA Resolver: one peer of the Chord DHT ring formed by the Fog nodes.
  *
- * - Each node has a position on the ring (SHA-1 of its name, CHORD_BITS bits).
+ * - Each node has a position on the ring (SHA-1 of its name, CHORD_BITS = 64 bits, as an
+ *   unsigned long; ring arithmetic wraps modulo 2^64).
  * - Each key (string) lives on the successor node of SHA-1(key).
  * - The lookup (find_successor) is ITERATIVE: the caller asks node by node,
  *   following the finger tables, in O(log N) hops. HTTP handlers never call
@@ -63,7 +65,8 @@ import com.sun.net.httpserver.HttpServer;
 final class ChordNode {
 
     static final int M = Config.CHORD_BITS;
-    static final int RING = 1 << M;
+    /** Identifiers are the low M bits of an unsigned long; arithmetic is modulo 2^M. */
+    static final long MASK = M >= 64 ? -1L : (1L << M) - 1;
     private static final Duration TIMEOUT = Duration.ofMillis(Config.FAILURE_TIMEOUT_MS);
 
     /** Lookup result: responsible node and number of hops (remote calls). */
@@ -95,7 +98,7 @@ final class ChordNode {
     /** Called with the keys (from, to] that were stored on a node found down (only by its predecessor). */
     private volatile Consumer<Range> ringChanged = r -> { };
     /** Consecutive timeouts per node id (a refused connection counts as down at once). */
-    private final Map<Integer, Integer> strikes = new ConcurrentHashMap<>();
+    private final Map<Long, Integer> strikes = new ConcurrentHashMap<>();
     /** Set when the predecessor was found down, so its replacement is logged. */
     private volatile boolean predecessorLost;
 
@@ -107,26 +110,36 @@ final class ChordNode {
 
     // ------------------------------------------------------------ utilities
 
-    static int hash(String s) {
+    static long hash(String s) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-1").digest(s.getBytes(StandardCharsets.UTF_8));
-            return ((d[0] & 0xFF) << 8 | (d[1] & 0xFF)) & (RING - 1);
+            return ByteBuffer.wrap(d).getLong() & MASK;     // first 64 bits of the SHA-1
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(e);
         }
     }
 
-    /** x in the open ring interval (a, b). a == b means the whole ring except a. */
-    static boolean between(int x, int a, int b) {
-        if (a < b) {
-            return x > a && x < b;
+    /** x in the open ring interval (a, b), comparing unsigned. a == b means the whole ring except a. */
+    static boolean between(long x, long a, long b) {
+        if (Long.compareUnsigned(a, b) < 0) {
+            return Long.compareUnsigned(x, a) > 0 && Long.compareUnsigned(x, b) < 0;
         }
-        return x > a || x < b;
+        return Long.compareUnsigned(x, a) > 0 || Long.compareUnsigned(x, b) < 0;
     }
 
     /** x in the ring interval (a, b]. */
-    static boolean betweenInclusive(int x, int a, int b) {
+    static boolean betweenInclusive(long x, long a, long b) {
         return x == b || between(x, a, b);
+    }
+
+    /** Start of finger i of node n: (n + 2^i) mod 2^M. */
+    static long fingerStart(long n, int i) {
+        return (n + (1L << i)) & MASK;
+    }
+
+    /** Identifier for logs (unsigned decimal). */
+    static String show(long id) {
+        return Long.toUnsignedString(id);
     }
 
     NodeRef successor() {
@@ -224,14 +237,24 @@ final class ChordNode {
         }
     }
 
-    /** Updates one finger table entry at a time: finger[i] = successor(id + 2^i). */
+    /**
+     * Updates the finger table: finger[i] = successor(id + 2^i). One lookup per round; the
+     * following fingers whose start still falls before the node found point to the same node
+     * and are filled without a lookup (with 64-bit ids most of the 64 fingers are the successor).
+     */
     void fixFingers() {
+        int i = nextFinger;
         try {
-            int i = nextFinger;
-            nextFinger = (nextFinger + 1) % M;
-            fingers[i] = findSuccessor((self.id + (1 << i)) % RING).node();
+            NodeRef f = findSuccessor(fingerStart(self.id, i)).node();
+            fingers[i] = f;
+            int j = i + 1;
+            while (!f.equals(self) && j < M && betweenInclusive(fingerStart(self.id, j), self.id, f.id)) {
+                fingers[j] = f;
+                j++;
+            }
+            nextFinger = j % M;
         } catch (IOException e) {
-            // try again next round
+            nextFinger = (i + 1) % M;            // try again next round
         }
     }
 
@@ -291,8 +314,8 @@ final class ChordNode {
     }
 
     /** Ring interval of keys (from, to]. */
-    record Range(int from, int to) {
-        boolean contains(int key) {
+    record Range(long from, long to) {
+        boolean contains(long key) {
             return betweenInclusive(key, from, to);
         }
     }
@@ -313,12 +336,12 @@ final class ChordNode {
 
     // ------------------------------------------------------------ iterative lookup
 
-    Lookup findSuccessor(int key) throws IOException {
+    Lookup findSuccessor(long key) throws IOException {
         return findSuccessor(key, self);
     }
 
     /** Lookup that survives dead nodes: drops the node that did not answer and starts again from here. */
-    Lookup findSuccessor(int key, NodeRef start) throws IOException {
+    Lookup findSuccessor(long key, NodeRef start) throws IOException {
         Unreachable last = null;
         for (int attempt = 0; attempt < Config.SUCCESSOR_LIST_SIZE + 1; attempt++) {
             try {
@@ -331,7 +354,7 @@ final class ChordNode {
         throw last;
     }
 
-    private Lookup lookup(int key, NodeRef start) throws IOException {
+    private Lookup lookup(long key, NodeRef start) throws IOException {
         NodeRef n = start;
         int hops = 0;
         for (int i = 0; i < 4 * M; i++) {
@@ -365,7 +388,7 @@ final class ChordNode {
     }
 
     /** Closest known node before the key, from the finger table and the successor list. */
-    private NodeRef closestPreceding(int key) {
+    private NodeRef closestPreceding(long key) {
         NodeRef best = self;
         for (int i = M - 1; i >= 0; i--) {
             NodeRef f = fingers[i];
@@ -380,6 +403,68 @@ final class ChordNode {
             }
         }
         return best;
+    }
+
+    // ------------------------------------------------------------ broadcast over the fingers
+
+    /**
+     * Sends payload to every other live node of the ring exactly once, over the finger tables
+     * (El-Ansary et al., "Efficient Broadcast in Structured P2P Networks", IPTPS 2003): the ring
+     * is split into disjoint intervals, one per finger, and each finger is responsible for
+     * forwarding inside its interval. N - 1 messages, depth O(log N), at most O(log N) sends per
+     * node, and no lookup of addresses ("fog:{id}" records may have been lost with a failed node).
+     * Blocking: call it off the HTTP handlers and the logic thread.
+     */
+    int broadcast(String path, JsonObject payload) {
+        return forward(path, payload, self.id);
+    }
+
+    /**
+     * Forwards payload to the known nodes in (self, limit); each one gets the interval up to the
+     * next one. limit == self.id means the whole ring. Returns the number of direct sends.
+     */
+    int forward(String path, JsonObject payload, long limit) {
+        List<NodeRef> targets = new ArrayList<>();
+        List<NodeRef> known = new ArrayList<>(Arrays.asList(fingers));
+        known.addAll(successors);
+        for (NodeRef n : known) {
+            if (n != null && !n.equals(self) && between(n.id, self.id, limit) && !targets.contains(n)) {
+                targets.add(n);
+            }
+        }
+        targets.sort((a, b) -> Long.compareUnsigned((a.id - self.id) & MASK, (b.id - self.id) & MASK));   // ring distance
+        int sent = 0;
+        for (int k = 0; k < targets.size(); k++) {
+            long subLimit = k + 1 < targets.size() ? targets.get(k + 1).id : limit;
+            sent += send(path, payload, targets.get(k), subLimit, 0);
+        }
+        return sent;
+    }
+
+    /** Sends to t (responsible for (t, subLimit)); if t is down, the next live node takes its interval. */
+    private int send(String path, JsonObject payload, NodeRef t, long subLimit, int attempt) {
+        JsonObject body = new JsonObject();
+        payload.entrySet().forEach(e -> body.add(e.getKey(), e.getValue()));
+        body.addProperty("limit", subLimit);
+        try {
+            FogCommunication.post(t.http + path, body, TIMEOUT);
+            return 1;
+        } catch (IOException e) {
+            failed(t, e);
+            if (attempt >= Config.SUCCESSOR_LIST_SIZE) {
+                return 0;
+            }
+            try {
+                NodeRef next = findSuccessor((t.id + 1) & MASK).node();
+                if (!next.equals(t) && !next.equals(self) && between(next.id, t.id, subLimit)) {
+                    log.accept(String.format("broadcast: %s did not answer; its interval goes to %s", t, next));
+                    return send(path, payload, next, subLimit, attempt + 1);
+                }
+            } catch (IOException ignored) {
+                // nobody else in that interval can be reached now
+            }
+            return 0;
+        }
     }
 
     // ------------------------------------------------------------ DHT (put/get)
@@ -446,11 +531,11 @@ final class ChordNode {
      */
     Map<String, Claim> claimAll(Map<String, JsonObject> records) {
         List<String> keys = new ArrayList<>(records.keySet());
-        keys.sort((a, b) -> Integer.compare(hash(a), hash(b)));
+        keys.sort((a, b) -> Long.compareUnsigned(hash(a), hash(b)));
         Map<String, Claim> out = new HashMap<>();
         int i = 0;
         while (i < keys.size()) {
-            int first = hash(keys.get(i));
+            long first = hash(keys.get(i));
             Lookup l;
             try {
                 l = findSuccessor(first);
@@ -546,7 +631,7 @@ final class ChordNode {
             FogCommunication.respond(ex, 200, r);
         });
         http.createContext("/chord/closest", ex -> {
-            int key = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject().get("key").getAsInt();
+            long key = JsonParser.parseString(FogCommunication.body(ex)).getAsJsonObject().get("key").getAsLong();
             JsonObject r = new JsonObject();
             r.add("closest", FogApp.JSON.toJsonTree(closestPreceding(key)));
             r.add("successor", FogApp.JSON.toJsonTree(successor()));

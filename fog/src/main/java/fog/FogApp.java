@@ -2,7 +2,6 @@ package fog;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,10 +57,10 @@ public class FogApp {
      *  4. the address record "fog:{id}" of every node can be read from the ring.
      */
     private static void awaitRing(List<FogNode> nodes) throws InterruptedException {
-        Map<Integer, FogNode> byId = new HashMap<>();
+        Map<Long, FogNode> byId = new HashMap<>();
         nodes.forEach(n -> byId.put(n.ref.id, n));
-        List<Integer> sortedIds = new ArrayList<>(byId.keySet());
-        Collections.sort(sortedIds);
+        List<Long> sortedIds = new ArrayList<>(byId.keySet());
+        sortedIds.sort(Long::compareUnsigned);
         FogNode first = nodes.get(0);
         String missing = "";
         for (int s = 1; s <= 120; s++) {
@@ -81,9 +80,9 @@ public class FogApp {
     }
 
     /** null if the ring is stable; otherwise a short description of what is not ready yet. */
-    private static String ringProblem(List<FogNode> nodes, Map<Integer, FogNode> byId,
-                                      List<Integer> sortedIds, FogNode first) {
-        List<Integer> order = new ArrayList<>();
+    private static String ringProblem(List<FogNode> nodes, Map<Long, FogNode> byId,
+                                      List<Long> sortedIds, FogNode first) {
+        List<Long> order = new ArrayList<>();
         FogNode current = first;
         do {
             order.add(current.ref.id);
@@ -94,13 +93,13 @@ public class FogApp {
         }
         for (FogNode n : nodes) {
             NodeRef p = n.chord.predecessor();
-            int expected = sortedIds.get(Math.floorMod(sortedIds.indexOf(n.ref.id) - 1, sortedIds.size()));
+            long expected = sortedIds.get(Math.floorMod(sortedIds.indexOf(n.ref.id) - 1, sortedIds.size()));
             if (p == null || p.id != expected) {
                 return "predecessor of Fog " + n.id + " not set";
             }
             List<NodeRef> fingers = n.chord.fingers();
             for (int i = 0; i < fingers.size(); i++) {
-                int target = (n.ref.id + (1 << i)) % ChordNode.RING;
+                long target = ChordNode.fingerStart(n.ref.id, i);
                 NodeRef f = fingers.get(i);
                 if (f == null || f.id != successorOf(target, sortedIds)) {
                     return "finger table of Fog " + n.id + " not converged";
@@ -120,9 +119,9 @@ public class FogApp {
     }
 
     /** First node id equal to or after the key on the ring. */
-    private static int successorOf(int key, List<Integer> sortedIds) {
-        for (int id : sortedIds) {
-            if (id >= key) {
+    private static long successorOf(long key, List<Long> sortedIds) {
+        for (long id : sortedIds) {
+            if (Long.compareUnsigned(id, key) >= 0) {
                 return id;
             }
         }

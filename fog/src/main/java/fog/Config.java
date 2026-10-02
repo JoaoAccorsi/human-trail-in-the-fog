@@ -33,8 +33,13 @@ public final class Config {
     public static final int QOS = 1;
 
     // ------------------------------------------------------------------ Chord
-    /** Bits of the ring identifier (2^16 positions). */
-    public static final int CHORD_BITS = 16;
+    /**
+     * Bits of the ring identifier (2^64 positions, the first 64 bits of SHA-1). With 16 bits
+     * (65,536 positions) two of 1,000 nodes would already share an identifier (birthday
+     * paradox: ~N^2 / 2^17 colliding pairs); with 64 bits the chance is negligible even for
+     * millions of nodes. Identifiers are unsigned longs (Long.compareUnsigned).
+     */
+    public static final int CHORD_BITS = 64;
     /** Successor list size: a node survives up to SUCCESSOR_LIST_SIZE - 1 consecutive failures after it. */
     public static final int SUCCESSOR_LIST_SIZE = 3;
     /** A node that does not answer within this time is considered down. */
