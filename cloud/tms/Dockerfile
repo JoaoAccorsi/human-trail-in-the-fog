@@ -1,4 +1,5 @@
-# Trail Management Service (Java 21). The JSONL files live in /app/data (mount a volume there).
+# Trail Management Service (Java 21). The data lives in PostgreSQL + PostGIS: set HTF_TMS_DB_URL,
+# HTF_TMS_DB_USER and HTF_TMS_DB_PASSWORD (docker-compose.yml; on AWS, the RDS instance).
 FROM maven:3.9-eclipse-temurin-21 AS build
 WORKDIR /src
 COPY pom.xml .
@@ -10,7 +11,5 @@ FROM eclipse-temurin:21-jre
 WORKDIR /app
 COPY --from=build /src/target/classes ./classes
 COPY --from=build /src/target/lib ./lib
-RUN mkdir -p data
-VOLUME /app/data
 EXPOSE 8080
 ENTRYPOINT ["java", "-cp", "classes:lib/*", "tms.TmsApp"]

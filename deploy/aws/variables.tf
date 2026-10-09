@@ -32,6 +32,18 @@ variable "cloud_instance_type" {
   default     = "t4g.small"
 }
 
+variable "db_instance_class" {
+  description = "RDS instance class of the TMS database (PostgreSQL + PostGIS, Graviton)."
+  type        = string
+  default     = "db.t4g.micro"
+}
+
+variable "db_engine_version" {
+  description = "PostgreSQL version of the TMS database (major only: RDS picks the latest minor)."
+  type        = string
+  default     = "16"
+}
+
 variable "edge_instance_type" {
   description = "EC2 type of each Edge simulator (a t4g.small handles about 1000 users)."
   type        = string

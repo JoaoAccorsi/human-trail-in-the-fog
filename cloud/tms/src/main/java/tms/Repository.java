@@ -1,189 +1,301 @@
 package tms;
 
-import java.io.BufferedWriter;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
 /**
- * Stores the GS1 EPCIS documents received from the Fogs (data/epcis.jsonl) and the visits
- * derived from them (data/visits.jsonl), both as JSON Lines.
+ * Stores the GS1 EPCIS documents received from the Fogs (table epcis_events) and the visits
+ * derived from them (table visits, with the visited cells as a PostGIS geometry) in PostgreSQL.
+ * See src/main/resources/schema.sql.
  *
- * The file is the source of truth: every query re-reads it, so data generated in
- * previous runs (or a file deleted/edited by hand) shows up right away, without
- * restarting the TMS.
- *
- * Key = pseudonym + day + fog + arrival: a resend from the Fog does not duplicate the visit.
- * Only the pseudonym h is stored, never the user's real id ("blind" cloud).
- * Future: replace with a database with geographic shards.
+ * Key = pseudonym + day + fog + arrival: a resend from the Fog does not duplicate the visit
+ * (INSERT ... ON CONFLICT DO NOTHING). Only the pseudonym h is stored, never the user's real id
+ * ("blind" cloud). The visits are returned with the same JSON fields the Fog sent, so the
+ * Cloud Mobility Platform does not depend on how they are stored.
  */
 class Repository {
 
-    private static final Comparator<JsonObject> BY_ARRIVAL =
-            Comparator.<JsonObject>comparingInt(v -> v.get("day").getAsInt())
-                    .thenComparingInt(v -> v.get("arrivalT").getAsInt());
+    /** Visit columns, in the order read by toVisit(). */
+    private static final String COLUMNS = "h, day, fog, fog_area_side, arrival_t, departure_t, pings, "
+            + "ST_AsGeoJSON(cells) AS cells, reason, next_fog, event_time";
 
-    private final Path file;
-    private final Path eventsFile;
+    /** Visits of a period: day range first (uses the keys), then the overlap in absolute timeslots. */
+    private static final String IN_PERIOD = " AND day BETWEEN ? AND ?"
+            + " AND day * " + Period.SLOTS_PER_DAY + " + arrival_t <= ?"
+            + " AND day * " + Period.SLOTS_PER_DAY + " + departure_t >= ?";
 
-    Repository(Path file, Path eventsFile) throws IOException {
-        this.file = file;
-        this.eventsFile = eventsFile;
-        Files.createDirectories(file.toAbsolutePath().getParent());
+    /** One statement per visit: the visit, and its EPCIS document only if the visit is new. */
+    private static final String INSERT = """
+            WITH new_visit AS (
+                INSERT INTO visits (h, day, fog, arrival_t, departure_t, fog_area_side, pings, cells,
+                                    reason, next_fog, event_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ST_SetSRID(ST_GeomFromGeoJSON(?), 0), ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                RETURNING h, day, fog, arrival_t)
+            INSERT INTO epcis_events (h, day, fog, arrival_t, document)
+            SELECT h, day, fog, arrival_t, ?::jsonb FROM new_visit""";
+
+    private final Db db;
+
+    Repository(Db db) {
+        this.db = db;
     }
 
-    /** Reads all visits from the file (without duplicates). */
-    private Map<String, JsonObject> read() throws IOException {
-        Map<String, JsonObject> visits = new LinkedHashMap<>();
-        if (Files.exists(file)) {
-            for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
-                if (!line.isBlank()) {
-                    try {
-                        JsonObject v = JsonParser.parseString(line).getAsJsonObject();
-                        visits.putIfAbsent(key(v), v);
-                    } catch (RuntimeException e) {
-                        // corrupted or old-format line: skip it
+    /**
+     * Saves the visits of a captured EPCIS document (one or a batch) in one transaction: each new
+     * visit goes to the visits table and its document to the event repository. Visits that already
+     * exist (resends) are skipped. Returns how many were new.
+     */
+    int saveCaptures(List<EpcisReader.Capture> captures) throws IOException {
+        try {
+            return db.inTransaction(c -> {
+                try (PreparedStatement ps = c.prepareStatement(INSERT)) {
+                    for (EpcisReader.Capture cap : captures) {
+                        JsonObject v = cap.visit();
+                        int i = 1;
+                        ps.setString(i++, v.get("h").getAsString());
+                        ps.setInt(i++, v.get("day").getAsInt());
+                        ps.setInt(i++, v.get("fog").getAsInt());
+                        ps.setInt(i++, v.get("arrivalT").getAsInt());
+                        ps.setInt(i++, v.get("departureT").getAsInt());
+                        ps.setInt(i++, v.get("fogAreaSide").getAsInt());
+                        ps.setInt(i++, v.get("pings").getAsInt());
+                        ps.setString(i++, multiPoint(v.get("cells")));
+                        ps.setString(i++, v.get("reason").getAsString());
+                        if (v.has("nextFog") && !v.get("nextFog").isJsonNull()) {
+                            ps.setInt(i++, v.get("nextFog").getAsInt());
+                        } else {
+                            ps.setNull(i++, Types.INTEGER);
+                        }
+                        ps.setString(i++, v.get("eventTime").getAsString());
+                        ps.setString(i, cap.document().toString());
+                        ps.addBatch();
+                    }
+                    int added = 0;
+                    for (int n : ps.executeBatch()) {
+                        added += n == Statement.SUCCESS_NO_INFO ? 1 : Math.max(n, 0);
+                    }
+                    return added;
+                }
+            });
+        } catch (SQLException e) {
+            throw failure(e);
+        }
+    }
+
+    /** The visit's cells [[x, y], ...] as a GeoJSON MultiPoint (malformed entries are skipped). */
+    private static String multiPoint(JsonElement cells) {
+        JsonArray coordinates = new JsonArray();
+        if (cells != null && cells.isJsonArray()) {
+            for (JsonElement cell : cells.getAsJsonArray()) {
+                if (cell.isJsonArray() && cell.getAsJsonArray().size() >= 2) {
+                    JsonArray xy = cell.getAsJsonArray();
+                    if (xy.get(0).isJsonPrimitive() && xy.get(0).getAsJsonPrimitive().isNumber()
+                            && xy.get(1).isJsonPrimitive() && xy.get(1).getAsJsonPrimitive().isNumber()) {
+                        JsonArray p = new JsonArray();
+                        p.add(xy.get(0));
+                        p.add(xy.get(1));
+                        coordinates.add(p);
                     }
                 }
             }
         }
-        return visits;
-    }
-
-    /**
-     * Saves the visits of a captured EPCIS document (one or a batch): each visit's events go to
-     * the event repository and the visit to the query store. Visits that already exist (resends)
-     * are skipped. Returns how many were new. The stored visits are read once per batch.
-     */
-    synchronized int saveCaptures(List<EpcisReader.Capture> captures) throws IOException {
-        Set<String> known = new HashSet<>(read().keySet());
-        int added = 0;
-        for (EpcisReader.Capture c : captures) {
-            if (known.add(key(c.visit()))) {
-                saveCapture(c.visit(), c.document());
-                added++;
-            }
-        }
-        return added;
-    }
-
-    private void saveCapture(JsonObject v, JsonObject document) throws IOException {
-        JsonObject line = new JsonObject();
-        line.addProperty("h", v.get("h").getAsString());
-        line.addProperty("day", v.get("day").getAsInt());
-        line.addProperty("fog", v.get("fog").getAsInt());
-        line.addProperty("arrivalT", v.get("arrivalT").getAsInt());
-        line.add("document", document);
-        append(eventsFile, line);
-        append(file, v);
-    }
-
-    private static void append(Path f, JsonObject o) throws IOException {
-        try (BufferedWriter out = Files.newBufferedWriter(f, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
-            out.write(o.toString());
-            out.newLine();
-        }
+        JsonObject geo = new JsonObject();
+        geo.addProperty("type", "MultiPoint");
+        geo.add("coordinates", coordinates);
+        return geo.toString();
     }
 
     /** EPCIS events of the pseudonym's visits that overlap the period (null = all), in time order. */
-    synchronized List<JsonObject> events(String h, Period period) throws IOException {
-        List<JsonObject> out = new ArrayList<>();
-        if (!Files.exists(eventsFile)) {
+    List<JsonObject> events(String h, Period period) throws IOException {
+        // USING merges h, day, fog and arrival_t, so IN_PERIOD's unqualified columns still apply
+        String sql = "SELECT e.document FROM epcis_events e JOIN visits v USING (h, day, fog, arrival_t)"
+                + " WHERE h = ?" + (period == null ? "" : IN_PERIOD);
+        try {
+            List<JsonObject> out = db.with(c -> {
+                try (PreparedStatement ps = c.prepareStatement(sql)) {
+                    ps.setString(1, h);
+                    setPeriod(ps, 2, period);
+                    List<JsonObject> events = new ArrayList<>();
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            JsonParser.parseString(rs.getString(1)).getAsJsonObject().getAsJsonObject("epcisBody")
+                                    .getAsJsonArray("eventList").forEach(e -> events.add(e.getAsJsonObject()));
+                        }
+                    }
+                    return events;
+                }
+            });
+            out.sort(Comparator.comparing(e -> e.get("eventTime").getAsString()));
             return out;
+        } catch (SQLException e) {
+            throw failure(e);
         }
-        for (String line : Files.readAllLines(eventsFile, StandardCharsets.UTF_8)) {
-            if (line.isBlank()) {
-                continue;
-            }
-            JsonObject l = JsonParser.parseString(line).getAsJsonObject();
-            if (l.get("h").getAsString().equals(h) && (period == null || period.overlaps(
-                    l.get("day").getAsInt(), l.get("arrivalT").getAsInt(), departureSlot(l)))) {
-                l.getAsJsonObject("document").getAsJsonObject("epcisBody").getAsJsonArray("eventList")
-                        .forEach(e -> out.add(e.getAsJsonObject()));
-            }
-        }
-        out.sort(Comparator.comparing(e -> e.get("eventTime").getAsString()));
-        return out;
-    }
-
-    /** Departure slot of a stored capture: the "htf:slot" of its departing event. */
-    private static int departureSlot(JsonObject line) {
-        for (var e : line.getAsJsonObject("document").getAsJsonObject("epcisBody").getAsJsonArray("eventList")) {
-            JsonObject o = e.getAsJsonObject();
-            if ("departing".equals(o.get("bizStep").getAsString()) && o.has("htf:slot")) {
-                return o.get("htf:slot").getAsInt();
-            }
-        }
-        return line.get("arrivalT").getAsInt();
     }
 
     /** Visits of the pseudonym that overlap the period (null = all), in arrival order. */
-    synchronized List<JsonObject> trail(String h, Period period) throws IOException {
-        List<JsonObject> out = new ArrayList<>();
-        for (JsonObject v : read().values()) {
-            if (v.get("h").getAsString().equals(h) && (period == null || period.overlaps(
-                    v.get("day").getAsInt(), v.get("arrivalT").getAsInt(), v.get("departureT").getAsInt()))) {
-                out.add(v);
-            }
-        }
-        out.sort(BY_ARRIVAL);
-        return out;
+    List<JsonObject> trail(String h, Period period) throws IOException {
+        String sql = "SELECT " + COLUMNS + " FROM visits WHERE h = ?" + (period == null ? "" : IN_PERIOD)
+                + " ORDER BY day, arrival_t, fog";
+        return visits(sql, ps -> {
+            ps.setString(1, h);
+            setPeriod(ps, 2, period);
+        });
     }
 
     /** Visits recorded on a day by one Fog node (fog = null: by every Fog node), in arrival order. */
-    synchronized List<JsonObject> visitsOfDay(Integer fog, int day) throws IOException {
-        List<JsonObject> out = new ArrayList<>();
-        for (JsonObject v : read().values()) {
-            if ((fog == null || v.get("fog").getAsInt() == fog) && v.get("day").getAsInt() == day) {
-                out.add(v);
+    List<JsonObject> visitsOfDay(Integer fog, int day) throws IOException {
+        String sql = "SELECT " + COLUMNS + " FROM visits WHERE day = ?" + (fog == null ? "" : " AND fog = ?")
+                + " ORDER BY day, arrival_t, fog, h";
+        return visits(sql, ps -> {
+            ps.setInt(1, day);
+            if (fog != null) {
+                ps.setInt(2, fog);
             }
-        }
-        out.sort(BY_ARRIVAL);
-        return out;
+        });
     }
 
     /** Summary per Fog node on a day: how many people (pseudonyms) and visits. */
-    synchronized List<JsonObject> fogsOfDay(int day) throws IOException {
-        Map<Integer, JsonObject> byFog = new TreeMap<>();
-        Map<Integer, Set<String>> people = new TreeMap<>();
-        for (JsonObject v : read().values()) {
-            if (v.get("day").getAsInt() != day) {
-                continue;
-            }
-            int fog = v.get("fog").getAsInt();
-            JsonObject r = byFog.computeIfAbsent(fog, f -> {
-                JsonObject o = new JsonObject();
-                o.addProperty("fog", f);
-                o.addProperty("visits", 0);
-                return o;
+    List<JsonObject> fogsOfDay(int day) throws IOException {
+        String sql = "SELECT fog, count(*) AS visits, count(DISTINCT h) AS people FROM visits"
+                + " WHERE day = ? GROUP BY fog ORDER BY fog";
+        try {
+            return db.with(c -> {
+                try (PreparedStatement ps = c.prepareStatement(sql)) {
+                    ps.setInt(1, day);
+                    List<JsonObject> out = new ArrayList<>();
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            JsonObject o = new JsonObject();
+                            o.addProperty("fog", rs.getInt("fog"));
+                            o.addProperty("visits", rs.getInt("visits"));
+                            o.addProperty("people", rs.getInt("people"));
+                            out.add(o);
+                        }
+                    }
+                    return out;
+                }
             });
-            r.addProperty("visits", r.get("visits").getAsInt() + 1);
-            people.computeIfAbsent(fog, f -> new HashSet<>()).add(v.get("h").getAsString());
+        } catch (SQLException e) {
+            throw failure(e);
         }
-        byFog.forEach((fog, r) -> r.addProperty("people", people.get(fog).size()));
-        return new ArrayList<>(byFog.values());
     }
 
-    synchronized int total() throws IOException {
-        return read().size();
+    int total() throws IOException {
+        try {
+            return db.with(c -> {
+                try (Statement s = c.createStatement(); ResultSet rs = s.executeQuery("SELECT count(*) FROM visits")) {
+                    rs.next();
+                    return rs.getInt(1);
+                }
+            });
+        } catch (SQLException e) {
+            throw failure(e);
+        }
     }
 
-    private static String key(JsonObject v) {
-        return v.get("h").getAsString() + "|" + v.get("day").getAsInt() + "|"
-                + v.get("fog").getAsInt() + "|" + v.get("arrivalT").getAsInt();
+    /** Deletes every visit and EPCIS document (a fresh start for a new experiment run). */
+    void clear() throws IOException {
+        try {
+            db.with(c -> {
+                try (Statement s = c.createStatement()) {
+                    s.execute("TRUNCATE visits, epcis_events");
+                }
+                return null;
+            });
+        } catch (SQLException e) {
+            throw failure(e);
+        }
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    @FunctionalInterface
+    private interface Binder {
+        void bind(PreparedStatement ps) throws SQLException;
+    }
+
+    private List<JsonObject> visits(String sql, Binder binder) throws IOException {
+        try {
+            return db.with(c -> {
+                try (PreparedStatement ps = c.prepareStatement(sql)) {
+                    binder.bind(ps);
+                    List<JsonObject> out = new ArrayList<>();
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            out.add(toVisit(rs));
+                        }
+                    }
+                    return out;
+                }
+            });
+        } catch (SQLException e) {
+            throw failure(e);
+        }
+    }
+
+    /** Binds the 4 parameters of IN_PERIOD starting at index i (nothing when there is no period). */
+    private static void setPeriod(PreparedStatement ps, int i, Period period) throws SQLException {
+        if (period != null) {
+            ps.setInt(i, period.start() / Period.SLOTS_PER_DAY);
+            ps.setInt(i + 1, period.end() / Period.SLOTS_PER_DAY);
+            ps.setInt(i + 2, period.end());
+            ps.setInt(i + 3, period.start());
+        }
+    }
+
+    /** A row of the visits table as the visit JSON derived by EpcisReader.toVisit(). */
+    private static JsonObject toVisit(ResultSet rs) throws SQLException {
+        JsonObject v = new JsonObject();
+        v.addProperty("h", rs.getString("h"));
+        v.addProperty("day", rs.getInt("day"));
+        v.addProperty("fog", rs.getInt("fog"));
+        v.addProperty("fogAreaSide", rs.getInt("fog_area_side"));
+        int arrivalT = rs.getInt("arrival_t");
+        int departureT = rs.getInt("departure_t");
+        v.addProperty("arrivalT", arrivalT);
+        v.addProperty("departureT", departureT);
+        v.addProperty("arrival", EpcisReader.hhmm(arrivalT));
+        v.addProperty("departure", EpcisReader.hhmm(departureT));
+        v.addProperty("pings", rs.getInt("pings"));
+        v.add("cells", cells(rs.getString("cells")));
+        v.addProperty("reason", rs.getString("reason"));
+        int nextFog = rs.getInt("next_fog");
+        if (!rs.wasNull()) {
+            v.addProperty("nextFog", nextFog);
+        }
+        v.addProperty("eventTime", rs.getString("event_time"));
+        return v;
+    }
+
+    /** GeoJSON MultiPoint -> [[x, y], ...] with integer cells, as the Fog sent them. */
+    private static JsonArray cells(String geoJson) {
+        JsonArray out = new JsonArray();
+        if (geoJson == null) {
+            return out;
+        }
+        for (JsonElement p : JsonParser.parseString(geoJson).getAsJsonObject().getAsJsonArray("coordinates")) {
+            JsonArray xy = new JsonArray();
+            xy.add(Math.round(p.getAsJsonArray().get(0).getAsDouble()));
+            xy.add(Math.round(p.getAsJsonArray().get(1).getAsDouble()));
+            out.add(xy);
+        }
+        return out;
+    }
+
+    private static IOException failure(SQLException e) {
+        return new IOException("database error: " + e.getMessage(), e);
     }
 }

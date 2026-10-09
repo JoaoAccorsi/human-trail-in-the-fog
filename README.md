@@ -167,8 +167,9 @@ with two `ObjectEvent`s:
 | `htf:*` extensions | day, slot, fogAreaSide | + arrivalSlot, cells, pings, reason, nextFog |
 
 `0614141` is the example GS1 Company Prefix of the GS1 standards. The TMS validates each document
-(400 if invalid), keeps it as received in `cloud/tms/data/epcis.jsonl` and derives the visit in
-`cloud/tms/data/visits.jsonl`; repeated documents are ignored (key: pseudonym, day, node, arrival).
+(400 if invalid), keeps it as received in the table `epcis_events` and derives the visit in the table
+`visits` of a PostgreSQL + PostGIS database; repeated documents are ignored (key: pseudonym, day,
+node, arrival — `INSERT ... ON CONFLICT DO NOTHING`).
 
 <details><summary>Example: the departing event of user 4005 at Fog 2 (day 20)</summary>
 
@@ -253,8 +254,33 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `GET` | `/visits?day=20[&fog=6]` | CMP | Visits recorded on day 20 by Fog 6, or by every Fog node (whole city) without `fog` |
 | `GET` | `/fogs?day=20` | CMP | Fog nodes with visits on the day: `[{fog, people, visits}]` |
 | `GET` | `/health` | anyone | Is the TMS up? |
+| `POST` | `/admin/clean` | scripts | Deletes every visit and EPCIS document (`CLEAN=1` of the run scripts) |
 
-Every query re-reads the JSONL files, so data from previous runs shows up without restarting the TMS.
+### TMS database (PostgreSQL + PostGIS)
+
+The TMS creates the schema at startup (`cloud/tms/src/main/resources/schema.sql`):
+
+| Table | Content |
+|---|---|
+| `visits` | One row per visit: `h`, `day`, `fog`, arrival and departure slots, pings, reason, next Fog, and the visited cells as a PostGIS `MultiPoint` (Cartesian plane of the 200×200 grid, SRID 0) |
+| `epcis_events` | The EPCIS document of each visit (`jsonb`), as received |
+
+- **Key** `(h, day, fog, arrival_t)` in both tables: deduplicates the resends of the store-and-forward
+  queue, and its prefix `(h, day)` serves the trail queries; an index on `(fog, day)` serves the
+  queries by Fog node and a GiST index the spatial queries on the cells.
+- **Partitioned by region:** `PARTITION BY HASH (fog)` in 4 partitions; a query for one Fog node reads
+  one partition, and the same column would be the distribution key of a sharded deployment (Citus).
+- The queries return the same JSON the Fog sent, so the platform does not depend on the storage. The
+  index on the cells allows, for example, "who crossed this region of the city on day 20":
+
+```sql
+SELECT DISTINCT h FROM visits
+WHERE day = 20 AND ST_Intersects(cells, ST_MakeEnvelope(80, 80, 100, 100, 0));
+```
+
+When the database fails, `/capture` answers 503 and the Fog nodes keep the visits in their
+store-and-forward queue until it is back. Local: `docker compose up -d postgres` (user, password and
+database `htf`; `psql -h localhost -U htf htf`). AWS: Amazon RDS for PostgreSQL.
 
 ---
 
@@ -267,6 +293,7 @@ Every query re-reads the JSONL files, so data from previous runs shows up withou
 | JDK 21 | `java -version` | `brew install openjdk@21` |
 | Maven | `mvn -v` | `brew install maven` |
 | Python 3.11+ | `python3 --version` | `brew install python` |
+| Docker Desktop (database) | `docker --version` | `brew install --cask docker` |
 
 No Mosquitto is needed: each Fog node ships its own embedded broker (Moquette). Create the platform's
 Python environment **outside iCloud** (inside iCloud Drive Python becomes very slow):
@@ -285,6 +312,7 @@ project folder as **Keep Downloaded** in Finder.
 From the project root, one terminal per service, **in this order**:
 
 ```bash
+docker compose up -d postgres                # 0. database (PostgreSQL + PostGIS), once: it keeps running
 cd cloud/tms && mvn -q compile exec:exec     # 1. TMS: wait for "[TMS] listening on http://localhost:8080"
 cd fog && mvn -q compile exec:exec           # 2. the 16 Fog nodes: wait for "you can run the Edge now"
 cd edge && mvn -q compile exec:exec          # 3. Edge: replays the user/day and exits
@@ -430,7 +458,8 @@ one file.
 
 `deploy/run-users.sh` calls it at the end of the run (label: `LABEL=c1-rsrp deploy/run-users.sh`,
 default `users-<range>-day<day>`), counting only the measurements made since the run started. Use
-`CLEAN=1`, so the TMS data holds only this run. By hand:
+`CLEAN=1`, so the TMS data holds only this run (it calls `POST /admin/clean`). By hand (the visits
+come from the TMS, `--visits http://localhost:8080` by default):
 
 ```bash
 python3 deploy/metrics.py --label c1-area --users 4000-5000 --dataset YJMob100K/yjmob100k-dataset2.csv
@@ -438,8 +467,13 @@ python3 deploy/metrics.py --label c1-area --users 4000-5000 --dataset YJMob100K/
 
 ### Stopping and useful commands
 
-`Ctrl+C` in each terminal. The data stays in `cloud/tms/data/epcis.jsonl` and `visits.jsonl`;
-delete both files to start from scratch.
+`Ctrl+C` in each terminal. The data stays in the database (Docker volume `pgdata`, kept by
+`docker compose stop` and `down`). To start from scratch: `curl -X POST localhost:8080/admin/clean`
+(or `docker compose down -v`, which deletes the volume).
+
+Data of the old JSONL version of the TMS (`cloud/tms/data/epcis.jsonl`) can be imported once:
+`cd cloud/tms && HTF_TMS_IMPORT=data/epcis.jsonl mvn -q compile exec:exec` (visits already stored
+are skipped).
 
 ```bash
 curl localhost:9008/status                   # Fog 8 on the ring: successor list, predecessor, fingers
@@ -474,6 +508,9 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_NUMBER_OF_FOGS` | Fog | Number of Fog nodes; the side of each area is computed from it (4, 16, 25, 64, 100, 400...; must be a perfect square whose root divides 200). Default 16 |
 | `HTF_FOG_AREA_SIDE` | Fog | Or the side of each node's area in cells; must divide 200 (50 = 16 nodes; 20 = 100 nodes; 10 = 400). Set only one of the two; clean the TMS data when you change it |
 | `HTF_TMS_URL` | Fog, platform | TMS address (`http://localhost:8080`) |
+| `HTF_TMS_DB_URL`, `HTF_TMS_DB_USER`, `HTF_TMS_DB_PASSWORD` | TMS | Database (`jdbc:postgresql://localhost:5432/htf`, `htf`, `htf`) |
+| `HTF_TMS_DB_SSLMODE`, `HTF_TMS_DB_WAIT_S`, `HTF_TMS_DB_POOL` | TMS | TLS to the database (`prefer`; `require` on AWS), how long to wait for it at startup (300 s), connections kept open (8) |
+| `HTF_TMS_IMPORT` | TMS | `epcis.jsonl` of the old JSONL version, imported at startup (none) |
 | `HTF_HANDOVER`, `HTF_HOM_DB`, `HTF_TTT_MIN` | Fog | Handover policy (`rsrp`), HOM (3 dB), TTT (60 min) |
 | `HTF_TMS_BATCH_MAX`, `HTF_TMS_BATCH_WINDOW_MS` | Fog | Visits per EPCIS document sent to the TMS (500) and flush period (1000 ms) |
 | `HTF_END_OF_DAY_JITTER_MS` | Fog | Random delay (0..value) before sending the visits closed at the end of the day (5000 ms) |
@@ -492,7 +529,8 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 
 ## Limitations of the prototype
 
-- The TMS stores JSONL files; the design uses PostgreSQL with PostGIS, sharded by region.
+- The TMS uses a single PostgreSQL instance; the visits are partitioned by region (Fog node), but
+  spreading the partitions over several servers (e.g. Citus) was not evaluated.
 - The store-and-forward queue of each Fog node is persisted on the node's disk; visits that are
   still open (not closed yet) are lost if the node crashes.
 - No vital signs are collected: the evaluation uses the positions of YJMob100K.

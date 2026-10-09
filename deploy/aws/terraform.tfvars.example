@@ -19,3 +19,5 @@ edge_groups = ["4000,4005"]
 # handover_policy = "area"   # baseline for comparison
 # hom_db          = 3
 # ttt_min         = 60
+
+# db_instance_class = "db.t4g.small"   # TMS database (RDS PostgreSQL + PostGIS); default db.t4g.micro

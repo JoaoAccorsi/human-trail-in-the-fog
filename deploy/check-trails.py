@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Consistency check of the trails stored by the TMS (cloud/tms/data/visits.jsonl).
+"""Consistency check of the trails stored by the TMS.
 
 For every pseudonym, its visits must not overlap in time: two Fog nodes must never have served
 the same person in the same timeslot (a single owner per user). Also prints how the visits ended.
 
-    python3 deploy/check-trails.py [path/to/visits.jsonl] [day]
+    python3 deploy/check-trails.py [source] [day]
+
+source: the TMS URL (default $HTF_TMS_URL or http://localhost:8080; then the day is required,
+default 20), or a file with the answer of /visits?day=N (JSON array) or a visits.jsonl of the old
+JSONL version of the TMS.
 """
 import collections
 import json
 import os
 import sys
+import urllib.request
 
-root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(root, "cloud", "tms", "data", "visits.jsonl")
+source = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("HTF_TMS_URL", "http://localhost:8080")
 day = int(sys.argv[2]) if len(sys.argv) > 2 else None
 
-visits = [json.loads(line) for line in open(path) if line.strip()]
+if source.startswith(("http://", "https://")):
+    day = 20 if day is None else day
+    with urllib.request.urlopen(f"{source.rstrip('/')}/visits?day={day}", timeout=120) as r:
+        visits = json.load(r)
+else:
+    text = open(source).read()
+    visits = json.loads(text) if text.lstrip().startswith("[") else \
+        [json.loads(line) for line in text.splitlines() if line.strip()]
 if day is not None:
     visits = [v for v in visits if v["day"] == day]
 by_person = collections.defaultdict(list)

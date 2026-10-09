@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Evaluation metrics of one run -> final CSV (one row per metric).
 
-Reads the visits stored by the TMS (cloud/tms/data/visits.jsonl) and the measurements written by
-the Fog nodes ({HTF_METRICS_DIR}/fog-{id}.csv, see fog/src/main/java/fog/Metrics.java), and appends
+Reads the visits stored by the TMS (GET /visits?day=N, or a file saved from it) and the measurements
+written by the Fog nodes ({HTF_METRICS_DIR}/fog-{id}.csv, see fog/src/main/java/fog/Metrics.java), and appends
 the metrics of the run to results/metrics.csv:
 
     run,scope,metric,value,unit
@@ -13,9 +13,12 @@ in the same file, ready to compare.
 
     python3 deploy/metrics.py --label c1-rsrp                         # local run, defaults below
     python3 deploy/metrics.py --label c2-5000 --users 4000-8999 --dataset YJMob100K/yjmob100k-dataset2.csv
-    python3 deploy/metrics.py --visits results/aws/visits.jsonl --fog-metrics results/aws/metrics --label aws-c3
+    python3 deploy/metrics.py --visits results/aws/c3/visits.json --fog-metrics results/aws/c3/metrics --label aws-c3
 
 Options:
+    --visits SRC       where the visits come from: the TMS URL (default $HTF_TMS_URL or
+                       http://localhost:8080), or a file with the answer of /visits (JSON array) or
+                       the visits.jsonl of the old JSONL version of the TMS
     --day N            day of the visits (default 20)
     --since MS         only Fog measurements at or after this epoch time in ms (default: all);
                        deploy/run-users.sh passes the start of the run
@@ -38,6 +41,7 @@ import os
 import statistics
 import sys
 import time
+import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MINUTES_PER_SLOT = 30
@@ -61,9 +65,16 @@ def percentile(values, p):
     return s[lo] + (s[hi] - s[lo]) * (k - lo)
 
 
-def read_visits(path, day):
-    with open(path) as f:
-        visits = [json.loads(line) for line in f if line.strip()]
+def read_visits(source, day):
+    """Visits of the day, from the TMS (URL) or from a file (JSON array or JSON Lines)."""
+    if source.startswith(("http://", "https://")):
+        with urllib.request.urlopen(f"{source.rstrip('/')}/visits?day={day}", timeout=120) as r:
+            visits = json.load(r)
+    else:
+        with open(source) as f:
+            text = f.read()
+        visits = json.loads(text) if text.lstrip().startswith("[") else \
+            [json.loads(line) for line in text.splitlines() if line.strip()]
     return [v for v in visits if v["day"] == day]
 
 
@@ -229,7 +240,7 @@ def fog_metrics(visits, measures):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--visits", default=os.path.join(ROOT, "cloud", "tms", "data", "visits.jsonl"))
+    ap.add_argument("--visits", default=os.environ.get("HTF_TMS_URL", "http://localhost:8080"))
     ap.add_argument("--fog-metrics", default=os.path.join(ROOT, "fog", "metrics"))
     ap.add_argument("--day", type=int, default=20)
     ap.add_argument("--since", type=int, default=0)

@@ -6,14 +6,15 @@
 #
 #   deploy/run-users.sh                    # users 4000-5000, day 20
 #   deploy/run-users.sh 4000-4100 20       # other range / day
-#   CLEAN=1 deploy/run-users.sh            # delete the TMS data first (fresh results)
+#   CLEAN=1 deploy/run-users.sh            # delete the TMS data first (fresh results): POST /admin/clean
 #   HTF_PING_INTERVAL_MS=3000 deploy/run-users.sh   # slower clock (real time per 30-min slot)
 #   LABEL=c1-rsrp deploy/run-users.sh      # label of the run in results/metrics.csv
 #
 # At the end, the metrics of the run (trails in the TMS + measurements of the Fog nodes since the
 # start of the run) are appended to results/metrics.csv by deploy/metrics.py.
 #
-# Start the TMS and the Fog nodes first:
+# Start the database, the TMS and the Fog nodes first:
+#   docker compose up -d postgres
 #   cd cloud/tms && mvn -q compile exec:exec
 #   cd fog && mvn -q compile exec:exec        (wait for "you can run the Edge now")
 set -euo pipefail
@@ -30,8 +31,8 @@ curl -fsS "$TMS/health" >/dev/null 2>&1 || { echo "The TMS is not answering at $
 curl -fsS "http://localhost:9001/status" >/dev/null 2>&1 || { echo "Fog 1 is not answering. Start the Fog nodes: cd fog && mvn -q compile exec:exec"; exit 1; }
 
 if [ "${CLEAN:-0}" = "1" ]; then
-  rm -f "$ROOT/cloud/tms/data/visits.jsonl" "$ROOT/cloud/tms/data/epcis.jsonl"
-  echo "Previous TMS data deleted (cloud/tms/data/visits.jsonl and epcis.jsonl)"
+  curl -fsS -X POST "$TMS/admin/clean" >/dev/null
+  echo "Previous TMS data deleted (tables visits and epcis_events)"
 fi
 
 export HTF_USERS="$USERS" HTF_DAY="$DAY"
@@ -60,7 +61,7 @@ print("%4s %7d %7d   (a person is counted once per Fog)" % ("all", sum(r["people
 
 echo
 echo "Consistency of the trails (no person served by two Fog nodes at the same time):"
-python3 "$ROOT/deploy/check-trails.py" "$ROOT/cloud/tms/data/visits.jsonl" "$DAY" || true
+python3 "$ROOT/deploy/check-trails.py" "$TMS" "$DAY" || true
 
 echo
 echo "Metrics of the run:"
@@ -69,5 +70,5 @@ DATASET="$ROOT/YJMob100K/yjmob100k-dataset2.csv"
 EXTRA=()                                    # an array keeps paths with spaces (e.g. iCloud Drive) whole
 [ -f "$DATASET" ] && EXTRA=(--dataset "$DATASET")
 python3 "$ROOT/deploy/metrics.py" --label "${LABEL:-users-$USERS-day$DAY}" --day "$DAY" --since "$START_MS" \
-  --visits "$ROOT/cloud/tms/data/visits.jsonl" --fog-metrics "$ROOT/fog/metrics" \
+  --visits "$TMS" --fog-metrics "$ROOT/fog/metrics" \
   --users "$USERS" ${EXTRA[@]+"${EXTRA[@]}"} || true

@@ -1,7 +1,8 @@
 # HTF on AWS: number_of_fogs Fog nodes (16 by default) + TMS + Cloud Mobility Platform +
 # Edge simulators (one per element of edge_groups, each replaying many users), one EC2
-# instance each, in a single VPC. Every instance runs one Docker container
-# pulled from ECR; the logs go to CloudWatch Logs (group /htf). No SSH: use SSM.
+# instance each, in a single VPC, and the TMS database in Amazon RDS for PostgreSQL (with
+# PostGIS). Every instance runs one Docker container pulled from ECR; the logs go to
+# CloudWatch Logs (group /htf). No SSH: use SSM.
 
 data "aws_caller_identity" "me" {}
 
@@ -76,6 +77,16 @@ resource "aws_route_table_association" "htf" {
   route_table_id = aws_route_table.htf.id
 }
 
+# RDS asks for subnets in two availability zones. The database runs in the zone of the
+# instances (subnet htf); this second, private subnet (no route to the internet) only completes
+# the subnet group.
+resource "aws_subnet" "db_b" {
+  vpc_id            = aws_vpc.htf.id
+  cidr_block        = "10.20.16.0/24"
+  availability_zone = data.aws_availability_zones.available.names[1]
+  tags              = { Name = "htf-db-b" }
+}
+
 # All HTF nodes talk freely to each other (MQTT 190x, HTTP 900x, TMS 8080) and to nothing else inbound.
 resource "aws_security_group" "nodes" {
   name        = "htf-nodes"
@@ -95,6 +106,21 @@ resource "aws_security_group" "nodes" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# The database only accepts the HTF nodes (in practice, the TMS) on the PostgreSQL port.
+resource "aws_security_group" "db" {
+  name        = "htf-db"
+  description = "TMS database (RDS PostgreSQL) from the HTF nodes"
+  vpc_id      = aws_vpc.htf.id
+
+  ingress {
+    description     = "PostgreSQL from the HTF nodes"
+    from_port       = 5432
+    to_port         = 5432
+    protocol        = "tcp"
+    security_groups = [aws_security_group.nodes.id]
   }
 }
 
@@ -187,6 +213,44 @@ resource "aws_iam_instance_profile" "node" {
   role = aws_iam_role.node.name
 }
 
+# ------------------------------------------------------------------ TMS database (RDS)
+# PostgreSQL with PostGIS: the TMS creates the extension and the tables at startup
+# (cloud/tms/src/main/resources/schema.sql). Not public, no backups, no final snapshot:
+# terraform destroy deletes it with everything else.
+resource "random_password" "db" {
+  length  = 24
+  special = false # RDS refuses / @ " and spaces; letters and digits are enough here
+}
+
+resource "aws_db_subnet_group" "htf" {
+  name       = "htf"
+  subnet_ids = [aws_subnet.htf.id, aws_subnet.db_b.id]
+}
+
+resource "aws_db_instance" "tms" {
+  identifier             = "htf-tms"
+  engine                 = "postgres"
+  engine_version         = var.db_engine_version
+  instance_class         = var.db_instance_class
+  allocated_storage      = 20
+  storage_type           = "gp3"
+  db_name                = "htf"
+  username               = "htf"
+  password               = random_password.db.result
+  db_subnet_group_name   = aws_db_subnet_group.htf.name
+  vpc_security_group_ids = [aws_security_group.db.id]
+  availability_zone      = data.aws_availability_zones.available.names[0] # same zone as the TMS
+  publicly_accessible    = false
+  multi_az               = false
+
+  backup_retention_period = 0
+  skip_final_snapshot     = true
+  deletion_protection     = false
+  apply_immediately       = true
+
+  tags = { Name = "htf-tms-db" }
+}
+
 # ------------------------------------------------------------------ instances
 locals {
   common = {
@@ -251,8 +315,15 @@ resource "aws_instance" "tms" {
     name    = "tms"
     image   = "tms"
     restart = "unless-stopped"
-    volume  = "-v /opt/htf/data:/app/data"
-    env     = {}
+    volume  = ""
+    # The TMS keeps trying to reach the database for up to 15 min (RDS may still be starting).
+    env = {
+      HTF_TMS_DB_URL      = "jdbc:postgresql://${aws_db_instance.tms.address}:${aws_db_instance.tms.port}/htf"
+      HTF_TMS_DB_USER     = aws_db_instance.tms.username
+      HTF_TMS_DB_PASSWORD = random_password.db.result
+      HTF_TMS_DB_SSLMODE  = "require" # RDS for PostgreSQL 15+ only accepts TLS connections
+      HTF_TMS_DB_WAIT_S   = 900
+    }
   }))
   user_data_replace_on_change = true
 

@@ -8,6 +8,11 @@ output "tms_url_inside_vpc" {
   value       = local.tms_url
 }
 
+output "tms_database" {
+  description = "RDS endpoint of the TMS database (PostgreSQL + PostGIS), reachable only from inside the VPC."
+  value       = "${aws_db_instance.tms.address}:${aws_db_instance.tms.port}/htf"
+}
+
 output "registry" {
   description = "ECR registry where deploy/aws/up.sh pushes the images."
   value       = local.registry

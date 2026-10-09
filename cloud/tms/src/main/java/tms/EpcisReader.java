@@ -145,7 +145,8 @@ final class EpcisReader {
         return v;
     }
 
-    private static String hhmm(int slot) {
+    /** Timeslot 0..47 -> "HH:MM". */
+    static String hhmm(int slot) {
         int m = slot * 30;
         return String.format("%02d:%02d", m / 60, m % 60);
     }

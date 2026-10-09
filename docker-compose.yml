@@ -4,11 +4,34 @@
 #   deploy/extract-users.sh 4005        # dataset rows of the simulated user (once)
 #   docker compose up --build
 #   open http://localhost:8501
+#
+# Only the database, for a local run with Maven (TMS, Fog and Edge in terminals):
+#   docker compose up -d postgres
 services:
+  # PostgreSQL 16 + PostGIS. The default image is multi-architecture (Apple Silicon runs it
+  # natively); the official postgis/postgis:16-3.4 also works (emulated on ARM64).
+  postgres:
+    image: ${HTF_POSTGIS_IMAGE:-imresamu/postgis:16-3.4-alpine3.21}
+    environment:
+      POSTGRES_DB: htf
+      POSTGRES_USER: htf
+      POSTGRES_PASSWORD: htf
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U htf -d htf"]
+      interval: 5s
+      retries: 20
+
   tms:
     build: cloud/tms
     ports: ["8080:8080"]
-    volumes: ["./cloud/tms/data:/app/data"]
+    environment:
+      HTF_TMS_DB_URL: jdbc:postgresql://postgres:5432/htf
+      HTF_TMS_DB_USER: htf
+      HTF_TMS_DB_PASSWORD: htf
+    depends_on:
+      postgres: { condition: service_healthy }
 
   fog:
     build: fog
@@ -35,3 +58,6 @@ services:
       HTF_START_DELAY_S: "20"
       HTF_CONNECT_RETRY_S: "120"
     depends_on: [fog]
+
+volumes:
+  pgdata:   # the database survives docker compose down (down -v deletes it)

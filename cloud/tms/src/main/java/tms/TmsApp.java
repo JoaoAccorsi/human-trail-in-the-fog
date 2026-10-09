@@ -6,7 +6,9 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
 
@@ -14,6 +16,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
 /**
@@ -25,10 +28,14 @@ import com.sun.net.httpserver.HttpServer;
  *   GET  /trail/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]    visits of h that overlap the period -> 200 [ ... ]
  *   GET  /fogs?day=N           Fog nodes with visits on day N             -> 200 [{fog, people, visits}]
  *   GET  /health
+ *   POST /admin/clean          deletes every visit and EPCIS document (fresh start for a new run)
  *
- * Each capture is kept as received (data/epcis.jsonl) and turned into a visit (data/visits.jsonl);
- * every query reads these files (the data already generated).
+ * Each capture is kept as received (table epcis_events) and turned into a visit (table visits,
+ * cells as PostGIS geometry) in PostgreSQL; see Repository and src/main/resources/schema.sql.
+ * When the database fails, the TMS answers 503 and the Fogs keep the visits in their
+ * store-and-forward queue until it is back.
  *
+ *   docker compose up -d postgres        (from the project root, once)
  *   cd cloud/tms && mvn -q compile exec:exec
  */
 public class TmsApp {
@@ -40,23 +47,94 @@ public class TmsApp {
     }
 
     public static void main(String[] args) throws IOException {
-        Repository repo = new Repository(Path.of(Config.FILE), Path.of(Config.EVENTS_FILE));
+        Db db = new Db(Config.DB_URL, Config.DB_USER, Config.DB_PASSWORD, Config.DB_SSLMODE, Config.DB_POOL);
+        db.init(Config.DB_WAIT_S);
+        Repository repo = new Repository(db);
+        if (Config.IMPORT != null) {
+            importJsonl(repo, Path.of(Config.IMPORT));
+        }
         HttpServer server = new TmsApp(repo).createServer(Config.PORT);
         server.start();
         System.out.printf("[TMS] listening on http://localhost:%d | %d visits in %s%n",
-                Config.PORT, repo.total(), Config.FILE);
+                Config.PORT, repo.total(), Config.DB_URL);
+    }
+
+    /**
+     * Imports the epcis.jsonl of the old JSONL version of the TMS (one {h, day, fog, arrivalT,
+     * document} per line): every document goes through the same reading as POST /capture.
+     */
+    private static void importJsonl(Repository repo, Path file) throws IOException {
+        List<EpcisReader.Capture> batch = new ArrayList<>();
+        int read = 0;
+        int added = 0;
+        for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+            if (line.isBlank()) {
+                continue;
+            }
+            try {
+                JsonObject doc = JsonParser.parseString(line).getAsJsonObject().getAsJsonObject("document");
+                batch.addAll(EpcisReader.toVisits(doc).captures());
+                read++;
+            } catch (RuntimeException e) {
+                System.out.printf("[TMS] import: skipped an invalid line (%s)%n", e.getMessage());
+            }
+            if (batch.size() >= 500) {
+                added += repo.saveCaptures(batch);
+                batch.clear();
+            }
+        }
+        added += repo.saveCaptures(batch);
+        System.out.printf("[TMS] imported %s: %d documents, %d new visits%n", file, read, added);
     }
 
     HttpServer createServer(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
-        server.createContext("/capture", this::capture);
-        server.createContext("/events/", this::events);
-        server.createContext("/visits", this::visits);
-        server.createContext("/trail/", this::trail);
-        server.createContext("/fogs", this::fogs);
+        server.createContext("/capture", safe(this::capture));
+        server.createContext("/events/", safe(this::events));
+        server.createContext("/visits", safe(this::visits));
+        server.createContext("/trail/", safe(this::trail));
+        server.createContext("/fogs", safe(this::fogs));
+        server.createContext("/admin/clean", safe(this::clean));
         server.createContext("/health", ex -> respond(ex, 200, "{\"ok\":true}"));
         server.setExecutor(Executors.newFixedThreadPool(4));
         return server;
+    }
+
+    /**
+     * A database failure becomes 503: the Fog keeps the visits in its store-and-forward queue and
+     * sends them again; the platform shows the error.
+     */
+    private static HttpHandler safe(HttpHandler handler) {
+        return ex -> {
+            try {
+                handler.handle(ex);
+            } catch (IOException e) {
+                System.out.printf("[TMS] %s %s failed: %s%n", ex.getRequestMethod(), ex.getRequestURI().getPath(),
+                        e.getMessage());
+                JsonObject err = new JsonObject();
+                err.addProperty("error", e.getMessage());
+                try {
+                    respond(ex, 503, err.toString());
+                } catch (IOException | RuntimeException ignored) {
+                    // the response had already started
+                }
+            } finally {
+                ex.close();
+            }
+        };
+    }
+
+    // ------------------------------------------------ POST /admin/clean
+
+    private void clean(HttpExchange ex) throws IOException {
+        if (!ex.getRequestMethod().equals("POST")) {
+            respond(ex, 405, "{\"error\":\"use POST\"}");
+            return;
+        }
+        int before = repo.total();
+        repo.clear();
+        System.out.printf("[TMS] database cleaned: %d visits deleted%n", before);
+        respond(ex, 200, "{\"ok\":true,\"deleted\":" + before + "}");
     }
 
     // ------------------------------------------------ GET /visits?day=[&fog=]
