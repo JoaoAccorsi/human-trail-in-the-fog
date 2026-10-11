@@ -193,6 +193,27 @@ class Repository {
         }
     }
 
+    /** EPCIS documents stored for a day (one per visit, as received), for the conformance check. */
+    List<JsonObject> documents(int day) throws IOException {
+        String sql = "SELECT document FROM epcis_events WHERE day = ? ORDER BY fog, arrival_t, h";
+        try {
+            return db.with(c -> {
+                try (PreparedStatement ps = c.prepareStatement(sql)) {
+                    ps.setInt(1, day);
+                    List<JsonObject> out = new ArrayList<>();
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            out.add(JsonParser.parseString(rs.getString(1)).getAsJsonObject());
+                        }
+                    }
+                    return out;
+                }
+            });
+        } catch (SQLException e) {
+            throw failure(e);
+        }
+    }
+
     int total() throws IOException {
         try {
             return db.with(c -> {

@@ -47,3 +47,7 @@ output "results_bucket" {
 output "day" {
   value = var.day
 }
+
+output "ping_interval_ms" {
+  value = var.ping_interval_ms
+}

@@ -19,6 +19,10 @@ import java.util.concurrent.Executors;
  *   handover      on the origin: from the handover decision to the COMMIT (detail: to, result, prepare_ms)
  *   tms_delivery  from the moment a visit could be sent to the TMS until the TMS confirmed it
  *                 (detail: batch size; the end-of-day jitter is not counted)
+ *   tms_request   one POST /capture: round trip (detail: visits, bytes of the EPCIS document,
+ *                 HTTP status; 0 = TMS unreachable, the batch stays in the store-and-forward queue)
+ *   lookup        one operation on the OIDA directory (Chord DHT): total time, h for user records
+ *                 (detail: op = get | put | claim, key = h | fog, hops = routing hops on the ring)
  *   node_down     this node detected that its successor failed (detail: lost key range)
  *   owner_refresh owner records republished after a ring change, value = time since the change was
  *                 reported (detail: sent, restored)

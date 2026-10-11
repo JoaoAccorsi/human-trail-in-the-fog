@@ -120,6 +120,13 @@ final class FogNode {
         this.chord = new ChordNode(ref, this::log);
         this.metrics = new Metrics(id);
         this.tms = new TmsClient(id, metrics);
+        // OIDA cost: routing hops and time of every directory operation (scenario C3)
+        chord.onLookup((op, key, hops, ms) -> {
+            int colon = key.indexOf(':');
+            String type = colon < 0 ? key : key.substring(0, colon);
+            metrics.record("lookup", ms, "h".equals(type) ? key.substring(colon + 1) : null,
+                    "op=" + op + ";key=" + type + ";hops=" + hops);
+        });
         for (int i = 0; i < lanes.length; i++) {
             lanes[i] = Executors.newSingleThreadExecutor();
         }

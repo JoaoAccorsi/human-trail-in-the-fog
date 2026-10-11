@@ -7,7 +7,10 @@
 #    (GET /visits?day=N, read from the RDS database) to the results bucket (through SSM, no SSH);
 # 2. they are downloaded to results/aws/<label>/;
 # 3. deploy/metrics.py computes the metrics, counting only what happened since the last
-#    deploy/aws/run-edges.sh (file .run-start; without it, everything since the instances started).
+#    deploy/aws/run-edges.sh (file .run-start; without it, everything since the instances started);
+# 4. the EPCIS documents of the day are validated against the GS1 EPCIS 2.0 JSON Schema
+#    (deploy/validate-epcis.py) and the TMS queries are timed on the TMS instance itself
+#    (deploy/bench-queries.py, the TMS is only reachable inside the VPC).
 # Run it after the Edges finished the day (deploy/aws/logs.sh edge- shows when).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -35,7 +38,8 @@ wait_for() {   # waits until every instance of an SSM command finished
 
 echo "Copying the measurements of the Fog nodes and the visits of the TMS to $DEST ..."
 FOGS="$(./ssm.sh tag:Role fog "aws s3 cp /opt/htf/metrics/ $DEST/metrics/\$(hostname)/ --recursive --region $REGION")"
-TMS="$(./ssm.sh tag:Role tms "curl -fsS -o /tmp/visits.json 'http://localhost:8080/visits?day=$DAY' && aws s3 cp /tmp/visits.json $DEST/visits.json --region $REGION")"
+BENCH="$(base64 < "$ROOT/deploy/bench-queries.py" | tr -d '\n')"
+TMS="$(./ssm.sh tag:Role tms "curl -fsS -o /tmp/visits.json 'http://localhost:8080/visits?day=$DAY' && aws s3 cp /tmp/visits.json $DEST/visits.json --region $REGION && curl -fsS -o /tmp/documents.json 'http://localhost:8080/documents?day=$DAY' && aws s3 cp /tmp/documents.json $DEST/documents.json --region $REGION && echo $BENCH | base64 -d > /tmp/bench-queries.py && python3 /tmp/bench-queries.py --tms http://localhost:8080 --day $DAY --rows-out /tmp/queries.json && aws s3 cp /tmp/queries.json $DEST/queries.json --region $REGION")"
 wait_for "$FOGS"
 wait_for "$TMS"
 
@@ -48,4 +52,7 @@ SINCE=0
 python3 "$ROOT/deploy/metrics.py" --label "$LABEL" --day "$DAY" --since "$SINCE" \
   --visits "$OUT/visits.json" --fog-metrics "$OUT/metrics" \
   --users "$USERS" --dataset "$ROOT/edge/data/users.csv" \
-  --crash-times "$ROOT/results/crash-times.csv"
+  --crash-times "$ROOT/results/crash-times.csv" --tms-outages "$ROOT/results/tms-outages.csv"
+
+python3 "$ROOT/deploy/validate-epcis.py" --label "$LABEL" --day "$DAY" --documents "$OUT/documents.json" || true
+[ -f "$OUT/queries.json" ] && python3 "$ROOT/deploy/bench-queries.py" --label "$LABEL" --rows-in "$OUT/queries.json"

@@ -72,8 +72,11 @@ visits in their store-and-forward queue. For clean measurements, wait for the TM
 |---|---|
 | `deploy/aws/logs.sh` / `deploy/aws/logs.sh fog-7` | Follows the logs of all nodes / of one node |
 | `deploy/aws/run-edges.sh` | Replays the day again on every Edge (and marks the start of a new run); `CLEAN=1` first deletes the visits of the previous runs from the database |
+| `CLEAN=1 OUTAGE_S=30 deploy/aws/run-edges.sh` | Scenario C2: new run with a TMS outage of 30 s in the middle of the day (`KIND=stop` for a real `docker stop`) |
+| `CLEAN=1 CRASH_FOG=7 deploy/aws/run-edges.sh` | Scenario C3: new run with an abrupt crash of Fog 7 in the middle of the day |
+| `deploy/aws/tms-outage.sh 30` | TMS outage of 30 s now; the window goes to `results/tms-outages.csv` |
 | `deploy/aws/crash-fog.sh 7` | Abrupt failure of Fog 7 (kills its container, no warning); the time goes to `results/crash-times.csv` |
-| `deploy/aws/collect-metrics.sh c2-5000` | After the Edges finish: gathers the measurements of the Fog nodes and the visits of the day from the TMS (`/visits?day=N`) (through the S3 bucket `results_bucket`) into `results/aws/c2-5000/` and appends the metrics of the run to `results/metrics.csv` |
+| `deploy/aws/collect-metrics.sh c2-5000` | After the Edges finish: gathers the measurements of the Fog nodes, the visits and the EPCIS documents of the day from the TMS and the response times of its queries (measured on the TMS instance) (through the S3 bucket `results_bucket`) into `results/aws/c2-5000/` and appends the metrics of the run to `results/metrics.csv` |
 | `deploy/aws/restore-fog.sh 7` | Starts Fog 7 again; it rejoins the ring and sends the visits left in its store-and-forward queue (`/opt/htf/queue` survives the container) |
 | `deploy/aws/redeploy.sh` | After changing the code: rebuilds, pushes and restarts every container |
 | `deploy/aws/ssm.sh tag:Name htf-tms "<cmd>"` | Runs any shell command on the selected instances |

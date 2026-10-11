@@ -254,7 +254,10 @@ re-identify someone (home and work), so such queries must be restricted to autho
 | `GET` | `/visits?day=20[&fog=6]` | CMP | Visits recorded on day 20 by Fog 6, or by every Fog node (whole city) without `fog` |
 | `GET` | `/fogs?day=20` | CMP | Fog nodes with visits on the day: `[{fog, people, visits}]` |
 | `GET` | `/health` | anyone | Is the TMS up? |
+| `GET` | `/documents?day=20` | `validate-epcis.py` | EPCIS documents stored for the day (one per visit, as received) |
+| `GET` | `/stats` | `bench-queries.py` | Captures since the start or the last clean: requests, visits new / repeated (resends discarded) / rejected, refused during an outage |
 | `POST` | `/admin/clean` | scripts | Deletes every visit and EPCIS document (`CLEAN=1` of the run scripts) |
+| `POST` | `/admin/outage?seconds=30` | `tms-outage.sh` | Simulated outage: `/capture` answers 503 for 30 s (scenario C2) |
 
 ### TMS database (PostgreSQL + PostGIS)
 
@@ -443,6 +446,8 @@ Each Fog node writes its measurements to `fog/metrics/fog-{id}.csv`
 | `ping` | Arrival of the ping (MQTT) to the end of its processing: lane queue + handover logic |
 | `handover` | On the origin, from the handover decision to the COMMIT (or the abort); `detail` has the target, the result and the PREPARE round trip |
 | `tms_delivery` | From the moment a visit may be sent (end-of-day jitter excluded) until the TMS confirms it |
+| `tms_request` | One `POST /capture`: round trip, visits in the EPCIS document, its size in bytes and the HTTP status (0 = TMS unreachable) |
+| `lookup` | One operation on the OIDA directory (`get`, `put`, `claim` of a user record `h:` or an address `fog:`): time and routing hops on the Chord ring |
 | `node_down` | The node detected that its successor on the ring failed |
 | `owner_refresh` | Owner records republished after a ring change: time since the change was reported, records restored |
 | `crash` | Simulated crash of the node (`/admin/crash`) |
@@ -456,7 +461,30 @@ and TMS delivery times, aborted handovers, and, with a failure, the detection ti
 records restored. Every run is appended under its own label, so the scenarios can be compared in
 one file.
 
-`deploy/run-users.sh` calls it at the end of the run (label: `LABEL=c1-rsrp deploy/run-users.sh`,
+`metrics.py` also computes, with the dataset: the trail rebuilt in the cloud against the original
+trajectory (people whose sequence of cells is identical, and pings whose timeslot falls inside a stored
+visit); the EPCIS requests (count, failures, visits per request, bytes per visit) and, with a TMS outage,
+the delivery time of the visits that waited in the store-and-forward queue; and the hops and time of the
+directory lookups, next to the reference ½·log₂N of Chord.
+
+Two more scripts append to the same CSV: `deploy/validate-epcis.py` validates every stored EPCIS document
+against the official GS1 EPCIS 2.0 JSON Schema (downloaded once to `deploy/schema/`; needs
+`pip install jsonschema`) plus the HTF rules (pseudonym only, SGLN read point, one arriving and one
+departing event), and `deploy/bench-queries.py` times the TMS queries of the platform (Fog nodes, whole
+city, per Fog, trail of each person, trail in a period, EPCIS events) and reads the capture counters of
+the TMS (resends discarded).
+
+**Evaluation scenarios** (the event happens `AT_S` seconds after the first ping reaches the Fog nodes;
+by default half the replayed day, 12:00 of the dataset day):
+
+| Scenario | Command | What it shows |
+|---|---|---|
+| C1 | `CLEAN=1 LABEL=c1-htf deploy/run-users.sh` (and `HTF_HANDOVER=area` on the Fog for the baseline) | Handover decision |
+| C2 | `CLEAN=1 LABEL=c2-normal deploy/run-users.sh` | EPCIS conformance, trail fidelity, cost of the events and queries |
+| C2 | `CLEAN=1 OUTAGE_S=30 LABEL=c2-tms-down deploy/run-users.sh` | Store-and-forward: the TMS refuses captures for 30 s (`deploy/tms-outage.sh`); no visit lost or duplicated |
+| C3 | `CLEAN=1 CRASH_FOG=7 LABEL=c3-crash-fog7 deploy/run-users.sh` | Directory lookups (hops, time) and abrupt crash of Fog 7: detection, owner records restored, consistency of the trails. Restart the Fog nodes afterwards |
+
+`deploy/run-users.sh` calls them at the end of the run (label: `LABEL=c1-rsrp deploy/run-users.sh`,
 default `users-<range>-day<day>`), counting only the measurements made since the run started. Use
 `CLEAN=1`, so the TMS data holds only this run (it calls `POST /admin/clean`). By hand (the visits
 come from the TMS, `--visits http://localhost:8080` by default):

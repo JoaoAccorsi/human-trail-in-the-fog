@@ -27,6 +27,10 @@ Options:
     --dataset PATH     YJMob100K CSV, .csv.gz or edge/data/users.csv, used with --users
     --crash-times PATH CSV "time_ms,fog" of crashes made outside the Fog (deploy/aws/crash-fog.sh);
                        crashes made with /admin/crash are already in the Fog measurements
+    --tms-outages PATH CSV "from_ms,until_ms,kind" of TMS outages (deploy/tms-outage.sh,
+                       deploy/aws/tms-outage.sh), scenario C2
+    --salt S           pseudonym secret, to match the dataset users to the stored trails
+                       (default $HTF_SALT or htf-dev-salt)
     --ping-pong-min M  a return to the previous Fog within M minutes counts as ping-pong (default 60)
     --out PATH         final CSV (default results/metrics.csv)
 """
@@ -35,6 +39,8 @@ import collections
 import csv
 import glob
 import gzip
+import hashlib
+import hmac
 import json
 import math
 import os
@@ -92,16 +98,50 @@ def read_measurements(folder, since):
     return rows
 
 
-def expected_pings(dataset, users, day):
-    """Rows of the dataset for these users on the day = pings the Edge should have published."""
-    n = 0
+def read_dataset(dataset, users, day):
+    """Rows of the dataset for these users on the day (= pings the Edge should have published):
+    {uid: [(t, x, y), ...] in time order}."""
+    rows = collections.defaultdict(list)
     with (gzip.open(dataset, "rt") if dataset.endswith(".gz") else open(dataset)) as f:
         next(f)
         for line in f:
-            uid, d, _ = line.split(",", 2)
+            uid, d, t, x, y = line.strip().split(",")[:5]
             if int(d) == day and int(uid) in users:
-                n += 1
-    return n
+                rows[int(uid)].append((int(t), int(x), int(y)))
+    for r in rows.values():
+        r.sort()
+    return rows
+
+
+def pseudonym(uid, salt):
+    """Same h as the Edge and the platform: HMAC-SHA256(salt, uid)."""
+    return hmac.new(salt.encode(), str(uid).encode(), hashlib.sha256).hexdigest()
+
+
+def dedup(cells):
+    """Consecutive repeated cells collapsed (a visit keeps a cell once while the person stays in it)."""
+    out = []
+    for c in cells:
+        if not out or out[-1] != c:
+            out.append(c)
+    return out
+
+
+def trail_fidelity(rows, trails, salt):
+    """Stored trail of each dataset user against the original trajectory (scenario C2):
+    the same sequence of cells, and every timeslot of the dataset inside one of the stored visits."""
+    found = exact = slots = covered = 0
+    for uid, pts in rows.items():
+        visits = trails.get(pseudonym(uid, salt), [])
+        slots += len(pts)
+        if not visits:
+            continue
+        found += 1
+        stored = dedup([tuple(c) for v in visits for c in v["cells"]])
+        if stored == dedup([(x, y) for _, x, y in pts]):
+            exact += 1
+        covered += sum(1 for t, _, _ in pts if any(v["arrivalT"] <= t <= v["departureT"] for v in visits))
+    return found, exact, slots, covered
 
 
 def duration_min(v):
@@ -156,9 +196,16 @@ def city_metrics(visits, measures, args, crash_times):
     pings = sum(v["pings"] for v in visits)
     rows.append(("pings_stored", pings, "count"))
     if args.users and args.dataset:
-        expected = expected_pings(args.dataset, parse_users(args.users), args.day)
+        data = read_dataset(args.dataset, parse_users(args.users), args.day)
+        expected = sum(len(r) for r in data.values())
         rows.append(("pings_expected", expected, "count"))
         rows.append(("ping_delivery_ratio", pings / expected * 100 if expected else None, "%"))
+        # trail rebuilt in the cloud against the original trajectory (C2)
+        found, exact, slots, covered = trail_fidelity(data, trails, args.salt)
+        rows.append(("trail_people_expected", len(data), "count"))
+        rows.append(("trail_people_found", found, "count"))
+        rows.append(("trail_cells_exact", exact / len(data) * 100 if data else None, "% of people"))
+        rows.append(("trail_slot_coverage", covered / slots * 100 if slots else None, "% of pings"))
     rows.append(("fog_handovers", handovers, "count"))
     rows.append(("fog_handovers_per_person", handovers / len(trails) if trails else None, "count"))
     pp = ping_pongs(trails, args.ping_pong_min)
@@ -187,6 +234,36 @@ def city_metrics(visits, measures, args, crash_times):
     rows.append(("handovers_aborted", sum(1 for m in by_event["handover"] if m["detail"].get("result") == "aborted"),
                  "count"))
     stats(rows, "tms_delivery", [m["value_ms"] for m in by_event["tms_delivery"]])
+
+    # ---- EPCIS requests to the TMS and store-and-forward (scenario C2)
+    reqs = by_event["tms_request"]
+    ok = [m for m in reqs if m["detail"].get("status", "").startswith("2")]
+    rows.append(("tms_requests", len(ok), "count"))
+    rows.append(("tms_requests_failed", len(reqs) - len(ok), "count"))
+    sent_visits = sum(int(m["detail"].get("visits", 0)) for m in ok)
+    sent_bytes = sum(int(m["detail"].get("bytes", 0)) for m in ok)
+    rows.append(("epcis_visits_per_request", sent_visits / len(ok) if ok else None, "visits"))
+    rows.append(("epcis_bytes_per_visit", sent_bytes / sent_visits if sent_visits else None, "bytes"))
+    rows.append(("epcis_bytes_total", sent_bytes, "bytes"))
+    stats(rows, "tms_request", [m["value_ms"] for m in ok])
+    outages = [o for o in args.outages]
+    rows.append(("tms_outages", len(outages), "count"))
+    if outages:
+        rows.append(("tms_outage_total", sum(b - a for a, b in outages) / 1000, "s"))
+        during = [m["value_ms"] for m in by_event["tms_delivery"]
+                  if any(a <= m["time_ms"] - m["value_ms"] <= b for a, b in outages)]
+        stats(rows, "tms_delivery_outage", during)
+
+    # ---- OIDA directory on the Chord ring (scenario C3)
+    lookups = by_event["lookup"]
+    nodes = len({m["fog"] for m in measures})
+    rows.append(("ring_nodes_measured", nodes, "count"))
+    if nodes > 1:
+        rows.append(("lookup_hops_reference", 0.5 * math.log2(nodes), "hops (1/2 log2 N)"))
+    for key, name in (("h", "lookup_user"), ("fog", "lookup_address")):
+        mine = [m for m in lookups if m["detail"].get("key") == key]
+        stats(rows, f"{name}_hops", [float(m["detail"].get("hops", 0)) for m in mine], "hops")
+        stats(rows, f"{name}_time", [m["value_ms"] for m in mine])
 
     # ---- failures (scenario C3)
     crashes = sorted([(m["time_ms"], m["fog"]) for m in by_event["crash"]] + crash_times)
@@ -249,6 +326,8 @@ def main():
     ap.add_argument("--dataset")
     ap.add_argument("--crash-times")
     ap.add_argument("--ping-pong-min", type=int, default=60)
+    ap.add_argument("--tms-outages")
+    ap.add_argument("--salt", default=os.environ.get("HTF_SALT", "htf-dev-salt"))
     ap.add_argument("--out", default=os.path.join(ROOT, "results", "metrics.csv"))
     args = ap.parse_args()
 
@@ -263,6 +342,12 @@ def main():
         with open(args.crash_times, newline="") as f:
             crash_times = [(int(r["time_ms"]), int(r["fog"])) for r in csv.DictReader(f)
                            if int(r["time_ms"]) >= args.since]
+
+    args.outages = []
+    if args.tms_outages and os.path.exists(args.tms_outages):
+        with open(args.tms_outages, newline="") as f:
+            args.outages = [(int(r["from_ms"]), int(r["until_ms"])) for r in csv.DictReader(f)
+                            if int(r["from_ms"]) >= args.since]
 
     rows = [("city",) + r for r in city_metrics(visits, measures, args, crash_times)] + fog_metrics(visits, measures)
 

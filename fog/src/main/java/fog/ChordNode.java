@@ -77,6 +77,12 @@ final class ChordNode {
     record Value(JsonElement value, int hops, NodeRef storedAt) {
     }
 
+    /** Observer of the DHT operations (evaluation measurements): operation, key, routing hops, total time. */
+    @FunctionalInterface
+    interface LookupObserver {
+        void done(String op, String key, int hops, double ms);
+    }
+
     /** A node on the lookup path did not answer. */
     private static final class Unreachable extends IOException {
         final NodeRef node;
@@ -101,6 +107,8 @@ final class ChordNode {
     private final Map<Long, Integer> strikes = new ConcurrentHashMap<>();
     /** Set when the predecessor was found down, so its replacement is logged. */
     private volatile boolean predecessorLost;
+    /** Told about every put, claim and get that succeeded (not about the ring maintenance). */
+    private volatile LookupObserver lookups = (op, key, hops, ms) -> { };
 
     ChordNode(NodeRef self, Consumer<String> log) {
         this.self = self;
@@ -329,6 +337,15 @@ final class ChordNode {
         ringChanged = r;
     }
 
+    /** Registers who is told about each put, claim and get (must not block). */
+    void onLookup(LookupObserver o) {
+        lookups = o;
+    }
+
+    private void observed(String op, String key, Lookup l, long startedNanos) {
+        lookups.done(op, key, l.hops(), (System.nanoTime() - startedNanos) / 1e6);
+    }
+
     private void setSuccessors(List<NodeRef> list) {
         successors.clear();
         successors.addAll(list);
@@ -470,11 +487,13 @@ final class ChordNode {
     // ------------------------------------------------------------ DHT (put/get)
 
     Lookup put(String key, Object value) throws IOException {
+        long started = System.nanoTime();
         for (int attempt = 0; ; attempt++) {
             Lookup l = findSuccessor(hash(key));
             JsonElement v = FogApp.JSON.toJsonTree(value);
             if (l.node().equals(self)) {
                 data.put(key, v);
+                observed("put", key, l, started);
                 return l;
             }
             JsonObject body = new JsonObject();
@@ -482,6 +501,7 @@ final class ChordNode {
             body.add("value", v);
             try {
                 FogCommunication.post(l.node().http + "/dht/put", body, TIMEOUT);
+                observed("put", key, l, started);
                 return l;
             } catch (IOException e) {
                 if (FogCommunication.answered(e) || attempt > 0) {
@@ -503,16 +523,20 @@ final class ChordNode {
      * at the same time always agree on a single winner.
      */
     Claim claim(String key, JsonObject value) throws IOException {
+        long started = System.nanoTime();
         for (int attempt = 0; ; attempt++) {
             Lookup l = findSuccessor(hash(key));
             if (l.node().equals(self)) {
-                return keepNewest(key, value);
+                Claim c = keepNewest(key, value);
+                observed("claim", key, l, started);
+                return c;
             }
             JsonObject body = new JsonObject();
             body.addProperty("key", key);
             body.add("value", value);
             try {
                 JsonObject r = FogCommunication.post(l.node().http + "/dht/claim", body, TIMEOUT).getAsJsonObject();
+                observed("claim", key, l, started);
                 return new Claim(r.get("previous"), r.get("stored"));
             } catch (IOException e) {
                 if (FogCommunication.answered(e) || attempt > 0) {
@@ -599,16 +623,21 @@ final class ChordNode {
     }
 
     Value get(String key) throws IOException {
+        long started = System.nanoTime();
         for (int attempt = 0; ; attempt++) {
             Lookup l = findSuccessor(hash(key));
             if (l.node().equals(self)) {
+                observed("get", key, l, started);
                 return new Value(data.get(key), l.hops(), self);
             }
             try {
                 String url = l.node().http + "/dht/get?key=" + URLEncoder.encode(key, StandardCharsets.UTF_8);
-                return new Value(FogCommunication.get(url, TIMEOUT), l.hops() + 1, l.node());
+                Value v = new Value(FogCommunication.get(url, TIMEOUT), l.hops() + 1, l.node());
+                observed("get", key, l, started);
+                return v;
             } catch (IOException e) {
                 if (e.getMessage() != null && e.getMessage().startsWith("HTTP 404")) {
+                    observed("get", key, l, started);
                     return new Value(null, l.hops() + 1, l.node());
                 }
                 if (FogCommunication.answered(e) || attempt > 0) {

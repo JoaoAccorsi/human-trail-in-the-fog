@@ -151,14 +151,19 @@ class TmsClient {
         doc.getAsJsonObject("epcisBody").add("eventList", events);
         String label = batch.size() == 1 ? batch.get(0).label()
                 : String.format("batch of %d visits of Fog %d", batch.size(), fogId);
+        String body = doc.toString();
+        int bytes = body.getBytes(StandardCharsets.UTF_8).length;
         HttpRequest req = HttpRequest.newBuilder(url)
                 .timeout(Duration.ofSeconds(10))
                 .header("Content-Type", "application/ld+json")
-                .POST(HttpRequest.BodyPublishers.ofString(doc.toString()))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
+        long started = System.nanoTime();
         try {
             HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
             boolean ok = resp.statusCode() / 100 == 2;
+            metrics.record("tms_request", Metrics.since(started), null,
+                    "visits=" + batch.size() + ";bytes=" + bytes + ";status=" + resp.statusCode());
             System.out.printf("[TMS ] POST /capture (EPCIS) %s -> HTTP %d%n", label, resp.statusCode());
             if (ok && tmsDown) {
                 tmsDown = false;
@@ -169,6 +174,8 @@ class TmsClient {
             Thread.currentThread().interrupt();
             return false;
         } catch (Exception ex) {
+            metrics.record("tms_request", Metrics.since(started), null,
+                    "visits=" + batch.size() + ";bytes=" + bytes + ";status=0");   // TMS unreachable
             if (!tmsDown) {
                 tmsDown = true;
                 System.out.printf("[TMS ] unavailable from Fog %d (%s): %d visit(s) kept in %s%n",

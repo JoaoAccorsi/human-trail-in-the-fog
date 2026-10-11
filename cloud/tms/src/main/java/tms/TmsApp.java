@@ -11,6 +11,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -27,8 +28,11 @@ import com.sun.net.httpserver.HttpServer;
  *   GET  /visits?fog=F&day=N   visits recorded by Fog F on day N          -> 200 [ ... ]
  *   GET  /trail/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]    visits of h that overlap the period -> 200 [ ... ]
  *   GET  /fogs?day=N           Fog nodes with visits on day N             -> 200 [{fog, people, visits}]
+ *   GET  /documents?day=N      EPCIS documents stored for day N (one per visit) -> 200 [ ... ]
+ *   GET  /stats                captures since the start or the last clean: requests, visits new / repeated / rejected
  *   GET  /health
  *   POST /admin/clean          deletes every visit and EPCIS document (fresh start for a new run)
+ *   POST /admin/outage?seconds=N  simulated outage: /capture answers 503 for N seconds (scenario C2)
  *
  * Each capture is kept as received (table epcis_events) and turned into a visit (table visits,
  * cells as PostGIS geometry) in PostgreSQL; see Repository and src/main/resources/schema.sql.
@@ -41,6 +45,14 @@ import com.sun.net.httpserver.HttpServer;
 public class TmsApp {
 
     private final Repository repo;
+
+    // Counters of POST /capture since the start or the last /admin/clean (GET /stats)
+    private final AtomicLong requests = new AtomicLong();
+    private final AtomicLong visitsNew = new AtomicLong();
+    private final AtomicLong visitsRepeated = new AtomicLong();
+    private final AtomicLong visitsRejected = new AtomicLong();
+    private final AtomicLong refusedInOutage = new AtomicLong();
+    private volatile long outageUntil;
 
     TmsApp(Repository repo) {
         this.repo = repo;
@@ -95,6 +107,9 @@ public class TmsApp {
         server.createContext("/trail/", safe(this::trail));
         server.createContext("/fogs", safe(this::fogs));
         server.createContext("/admin/clean", safe(this::clean));
+        server.createContext("/admin/outage", safe(this::outage));
+        server.createContext("/documents", safe(this::documents));
+        server.createContext("/stats", safe(this::stats));
         server.createContext("/health", ex -> respond(ex, 200, "{\"ok\":true}"));
         server.setExecutor(Executors.newFixedThreadPool(4));
         return server;
@@ -133,6 +148,11 @@ public class TmsApp {
         }
         int before = repo.total();
         repo.clear();
+        requests.set(0);
+        visitsNew.set(0);
+        visitsRepeated.set(0);
+        visitsRejected.set(0);
+        refusedInOutage.set(0);
         System.out.printf("[TMS] database cleaned: %d visits deleted%n", before);
         respond(ex, 200, "{\"ok\":true,\"deleted\":" + before + "}");
     }
@@ -147,11 +167,68 @@ public class TmsApp {
         visitsOfDay(ex);
     }
 
+    // ------------------------------------------------ POST /admin/outage?seconds=N
+
+    /** Simulated outage of the TMS: /capture answers 503 for N seconds, as if the cloud were down. */
+    private void outage(HttpExchange ex) throws IOException {
+        if (!ex.getRequestMethod().equals("POST")) {
+            respond(ex, 405, "{\"error\":\"use POST\"}");
+            return;
+        }
+        int seconds;
+        try {
+            Integer s = intParam(ex, "seconds");
+            seconds = s == null ? 30 : s;
+        } catch (NumberFormatException e) {
+            respond(ex, 400, "{\"error\":\"seconds must be a number\"}");
+            return;
+        }
+        long now = System.currentTimeMillis();
+        outageUntil = now + seconds * 1000L;
+        System.out.printf("[TMS] SIMULATED OUTAGE: /capture answers 503 for %d s%n", seconds);
+        respond(ex, 200, "{\"ok\":true,\"from_ms\":" + now + ",\"until_ms\":" + outageUntil + "}");
+    }
+
+    // ------------------------------------------------ GET /documents?day=N, GET /stats
+
+    private void documents(HttpExchange ex) throws IOException {
+        Integer day;
+        try {
+            day = intParam(ex, "day");
+        } catch (NumberFormatException e) {
+            day = null;
+        }
+        if (day == null) {
+            respond(ex, 400, "{\"error\":\"provide the day: /documents?day=20\"}");
+            return;
+        }
+        JsonArray arr = new JsonArray();
+        repo.documents(day).forEach(arr::add);
+        respond(ex, 200, arr.toString());
+    }
+
+    private void stats(HttpExchange ex) throws IOException {
+        JsonObject r = new JsonObject();
+        r.addProperty("captureRequests", requests.get());
+        r.addProperty("visitsNew", visitsNew.get());
+        r.addProperty("visitsRepeated", visitsRepeated.get());
+        r.addProperty("visitsRejected", visitsRejected.get());
+        r.addProperty("refusedInOutage", refusedInOutage.get());
+        r.addProperty("visitsStored", repo.total());
+        respond(ex, 200, r.toString());
+    }
+
     // ------------------------------------------------ POST /capture (GS1 EPCIS 2.0)
 
     private void capture(HttpExchange ex) throws IOException {
         if (!ex.getRequestMethod().equals("POST")) {
             respond(ex, 405, "{\"error\":\"use POST\"}");
+            return;
+        }
+        if (System.currentTimeMillis() < outageUntil) {
+            ex.getRequestBody().readAllBytes();
+            refusedInOutage.incrementAndGet();
+            respond(ex, 503, "{\"error\":\"simulated outage\"}");
             return;
         }
         EpcisReader.Batch batch;
@@ -174,6 +251,10 @@ public class TmsApp {
         }
         int added = repo.saveCaptures(batch.captures());
         int visits = batch.captures().size();
+        requests.incrementAndGet();
+        visitsNew.addAndGet(added);
+        visitsRepeated.addAndGet(visits - added);
+        visitsRejected.addAndGet(batch.rejected());
         if (visits == 1) {
             JsonObject v = batch.captures().get(0).visit();
             System.out.printf("[TMS] EPCIS capture Fog %5d %s-%s (%s)%s%n", v.get("fog").getAsInt(),

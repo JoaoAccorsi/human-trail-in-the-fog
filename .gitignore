@@ -8,6 +8,7 @@ store-and-forward-queue/
 metrics/
 results/
 deploy/aws/.run-start
+deploy/schema/
 # Java
 target/
 # Python
