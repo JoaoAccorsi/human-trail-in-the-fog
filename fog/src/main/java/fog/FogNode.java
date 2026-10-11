@@ -102,6 +102,7 @@ final class FogNode {
     private final Map<String, Context> prepared = new ConcurrentHashMap<>();  // received via PREPARE
     private final Map<String, NodeRef> inHandover = new ConcurrentHashMap<>(); // h -> target Fog
     private final Map<Integer, NodeRef> addresses = new ConcurrentHashMap<>(); // cache of "fog:{id}"
+    private final Map<Integer, long[]> liveness = new ConcurrentHashMap<>();   // fog -> {checked at, up 1/0}
     private final AtomicBoolean refreshScheduled = new AtomicBoolean(false);
     /** Lost key ranges waiting for the next targeted refresh (guarded by itself). */
     private final List<ChordNode.Range> lostRanges = new ArrayList<>();
@@ -276,7 +277,7 @@ final class FogNode {
             if (p.seq <= ctx.lastSeq) {
                 return;                                   // repeated or out of order
             }
-            HandoverDecision.Result d = HandoverDecision.evaluate(id, ctx, p);   // RSRP + Kalman + HOM + TTT
+            HandoverDecision.Result d = HandoverDecision.evaluate(id, ctx, p, this::isUp);   // RSRP + Kalman + HOM + TTT
             if (d.target() == null) {
                 record(p, ctx, d.summary());
             } else {
@@ -284,9 +285,93 @@ final class FogNode {
             }
         } else if (Grid.reaches(id, p.x, p.y)) {
             attach(p);
+        } else if (coversFor(p.x, p.y) > 0) {           // the Fog of this cell is down: covered here
+            attach(p);
         } else {
             redirect(p);
         }
+    }
+
+    // =========================================================== coverage of failed Fog nodes
+
+    /**
+     * Is the Fog node up? Its "fog:{id}" record on the ring was refreshed within ADDRESS_TTL_MS.
+     * The answer is kept for LIVENESS_CACHE_MS. When the ring cannot be asked, the node is assumed
+     * up: an area is only taken over when its Fog is known to be down.
+     */
+    boolean isUp(int fogId) {
+        if (fogId == id) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        long[] known = liveness.get(fogId);
+        if (known != null && now - known[0] < Config.LIVENESS_CACHE_MS) {
+            return known[1] == 1;
+        }
+        boolean up;
+        try {
+            ChordNode.Value v = chord.get("fog:" + fogId);
+            if (v.value() == null) {
+                up = false;
+            } else {
+                NodeRef r = FogApp.JSON.fromJson(v.value(), NodeRef.class);
+                up = now - r.seenAt <= Config.ADDRESS_TTL_MS;
+                if (up) {
+                    addresses.put(fogId, r);
+                }
+            }
+        } catch (IOException e) {
+            up = true;                                      // unknown: never take over on a doubt
+        }
+        boolean wasUp = known == null || known[1] == 1;
+        liveness.put(fogId, new long[] {now, up ? 1 : 0});
+        if (!up) {
+            addresses.remove(fogId);
+            if (wasUp) {
+                log("OIDA: Fog %d is down (address not refreshed on the ring)%s", fogId,
+                        Config.COVERAGE ? "; its area is covered by the closest live neighbor" : "");
+            }
+        } else if (!wasUp) {
+            log("OIDA: Fog %d is up again", fogId);
+        }
+        return up;
+    }
+
+    /**
+     * Fog that serves a cell: the Fog of the cell's area or, if that one is down, the live Fog
+     * among the 8 around it whose area center is closest to the cell (ties: lowest id). Every node
+     * applies the same rule, so they agree without talking to each other. null = no live Fog.
+     */
+    Integer servingFogOf(int x, int y) {
+        int home = Grid.fogOfCell(x, y);
+        if (isUp(home)) {
+            return home;
+        }
+        if (!Config.COVERAGE) {
+            return null;                                    // coverage off: the area has no service
+        }
+        Integer best = null;
+        double bestDistance = Double.MAX_VALUE;
+        for (int f : Radio.candidates(home, x, y)) {
+            if (f == home || !isUp(f)) {
+                continue;
+            }
+            double d = Grid.distanceToCenter(f, x, y);
+            if (d < bestDistance - 1e-9 || (Math.abs(d - bestDistance) <= 1e-9 && f < best)) {
+                best = f;
+                bestDistance = d;
+            }
+        }
+        return best;
+    }
+
+    /** The failed Fog whose cell this node covers, or 0 (the cell is in this node's area, or not covered here). */
+    private int coversFor(int x, int y) {
+        if (!Config.COVERAGE || Grid.reaches(id, x, y)) {
+            return 0;
+        }
+        Integer s = servingFogOf(x, y);
+        return s != null && s == id ? Grid.fogOfCell(x, y) : 0;
     }
 
     /**
@@ -337,7 +422,7 @@ final class FogNode {
     /** User this Fog does not serve and outside its area: points the Edge to the right Fog. */
     private void redirect(Ping p) {
         Integer owner = ownerOf(p.h);
-        if (owner != null && owner != id) {             // the user already has a serving Fog: send it there
+        if (owner != null && owner != id && isUp(owner)) { // the user already has a serving Fog: send it there
             NodeRef o = resolveFog(owner);
             if (o != null) {
                 log("user %s... is served by Fog %d -> redirected to it", brief(p.h), owner);
@@ -348,13 +433,19 @@ final class FogNode {
                 log("Fog %d did not answer; redirecting by area instead", owner);
             }
         }
-        int target = Grid.fogOfCell(p.x, p.y);
-        NodeRef b = resolveFog(target);
+        int home = Grid.fogOfCell(p.x, p.y);
+        Integer target = servingFogOf(p.x, p.y);
+        NodeRef b = target == null ? null : resolveFog(target);
         if (b == null) {
-            log("could not find Fog %d on the ring; ping %s dropped", target, p.time);
+            log("no live Fog for cell (%d,%d) (Fog %d is down); ping %s dropped", p.x, p.y, home, p.time);
             return;
         }
-        log("user %s... outside my area -> redirected to Fog %d", brief(p.h), target);
+        if (target != home) {
+            log("user %s... in the area of Fog %d, which is down -> redirected to Fog %d (coverage)",
+                    brief(p.h), home, target);
+        } else {
+            log("user %s... outside my area -> redirected to Fog %d", brief(p.h), target);
+        }
         commandEdge(p.h, b);
         relay(b, p);
     }
@@ -506,6 +597,10 @@ final class FogNode {
             return;                                     // repeated or out of order
         }
         ctx.lastSeq = p.seq;
+        int failed = coversFor(p.x, p.y);
+        if (failed > 0) {                                // ping served in the area of a Fog that is down
+            metrics.record("cover", 0, p.h, "for=" + failed);
+        }
         Visit v = openVisits.get(p.h);
         if (v == null) {
             v = new Visit();
@@ -535,8 +630,11 @@ final class FogNode {
     /** Address of another Fog, discovered on the Chord ring ("fog:{id}" record). */
     private NodeRef resolveFog(int fogId) {
         NodeRef cached = addresses.get(fogId);
-        if (cached != null) {
+        if (cached != null && isUp(fogId)) {             // a cached address of a Fog that went down is dropped
             return cached;
+        }
+        if (cached != null) {
+            return null;
         }
         try {
             ChordNode.Value v = chord.get("fog:" + fogId);

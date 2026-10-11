@@ -27,6 +27,12 @@ public final class Grid {
         return new int[] {x0, y0, x0 + Config.FOG_AREA_SIDE - 1, y0 + Config.FOG_AREA_SIDE - 1};
     }
 
+    /** Distance, in cells, from the cell to the center of the Fog node's area. */
+    public static double distanceToCenter(int fog, int x, int y) {
+        int[] a = area(fog);
+        return Math.hypot(x - (a[0] + a[2]) / 2.0, y - (a[1] + a[3]) / 2.0);
+    }
+
     /** Is the cell within the Fog node's reach (area + margin)? */
     public static boolean reaches(int fog, int x, int y) {
         int[] a = area(fog);

@@ -432,8 +432,18 @@ keys and never overwrites a more recent owner. A full republication also runs ev
 Cost per failure, for U users and N nodes: about U/N records rewritten (the lost ones), instead of
 all U. With 1,000,000 users and 1,000 nodes: ~1,000 writes, about one per node.
 
-Not recovered in this version: the contexts and open visits in the failed node's memory. Its Edges
-go back to the entry broker and are taken over by the node of their cell.
+**Coverage of the failed node's area** (cell outage compensation, as in cellular networks). Every node
+learns that a Fog is down when its `fog:{id}` address is no longer refreshed on the ring (10 s). From
+then on, each cell of that area is served by the live neighbor (of the 8 around it) whose area center
+is closest to the cell; every node applies the same rule, so they agree without talking. The Edges
+of the failed node go back to the entry broker, which redirects them to that neighbor; the neighbor
+accepts users outside its own area only while it covers a failed node, and a Fog that is down is
+never a handover target. When the node comes back, its users return to it by ordinary handovers
+(the RSRP of its area is again the strongest). `HTF_COVERAGE=off` turns this off (the area stays
+without service), to compare.
+
+Not recovered in this version: the contexts and open visits in the failed node's memory (the users
+start a new context on the neighbor) and the pings of the ~10 s until the failure is noticed.
 Visits already sent to the TMS are safe.
 
 ### Evaluation metrics
@@ -451,6 +461,7 @@ Each Fog node writes its measurements to `fog/metrics/fog-{id}.csv`
 | `node_down` | The node detected that its successor on the ring failed |
 | `owner_refresh` | Owner records republished after a ring change: time since the change was reported, records restored |
 | `crash` | Simulated crash of the node (`/admin/crash`) |
+| `cover` | A ping served in the area of a Fog node that is down (coverage by a neighbor) |
 
 `deploy/metrics.py` joins them with the visits stored by the TMS and appends one row per metric to
 **`results/metrics.csv`** (`run,scope,metric,value,unit`), for the whole city and for each Fog node:
@@ -482,7 +493,8 @@ by default half the replayed day, 12:00 of the dataset day):
 | C1 | `CLEAN=1 LABEL=c1-htf deploy/run-users.sh` (and `HTF_HANDOVER=area` on the Fog for the baseline) | Handover decision |
 | C2 | `CLEAN=1 LABEL=c2-normal deploy/run-users.sh` | EPCIS conformance, trail fidelity, cost of the events and queries |
 | C2 | `CLEAN=1 OUTAGE_S=30 LABEL=c2-tms-down deploy/run-users.sh` | Store-and-forward: the TMS refuses captures for 30 s (`deploy/tms-outage.sh`); no visit lost or duplicated |
-| C3 | `CLEAN=1 CRASH_FOG=7 LABEL=c3-crash-fog7 deploy/run-users.sh` | Directory lookups (hops, time) and abrupt crash of Fog 7: detection, owner records restored, consistency of the trails. Restart the Fog nodes afterwards |
+| C3 | `CLEAN=1 CRASH_FOG=7 LABEL=c3-crash-fog7 deploy/run-users.sh` | Directory lookups (hops, time) and abrupt crash of Fog 7: detection, owner records restored, coverage of its area by the neighbors, consistency of the trails. Restart the Fog nodes afterwards |
+| C3 (baseline) | Fog nodes started with `HTF_COVERAGE=off`, then `CLEAN=1 CRASH_FOG=7 LABEL=c3-crash-fog7-nocover deploy/run-users.sh` | The same crash without coverage: the area of Fog 7 stays without service |
 
 `deploy/run-users.sh` calls them at the end of the run (label: `LABEL=c1-rsrp deploy/run-users.sh`,
 default `users-<range>-day<day>`), counting only the measurements made since the run started. Use
@@ -544,6 +556,7 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_END_OF_DAY_JITTER_MS` | Fog | Random delay (0..value) before sending the visits closed at the end of the day (5000 ms) |
 | `HTF_FOG_LANES` | Fog | Logic lanes per node: users are spread over this many threads by pseudonym; one user's pings stay in order (8) |
 | `HTF_OWNER_REFRESH_MS`, `HTF_OWNER_REFRESH_JITTER_MS` | Fog | Full republication of the owner records (300000 ms); random extra wait after a failure (2000 ms) |
+| `HTF_COVERAGE`, `HTF_LIVENESS_CACHE_MS` | Fog | Coverage of the area of a failed Fog by its closest live neighbor (`on`); how long a node trusts what it learned about another being up or down (3000 ms) |
 | `HTF_HANDOVER_TIMEOUT_MS` | Fog | Abort a handover if the target does not COMMIT in this real time (10000 ms) |
 | `HTF_FOG_DATA` | Fog | Folder of the persistent store-and-forward queue, `{dir}/fog-{id}/outbox.jsonl` (`store-and-forward-queue`, inside `fog/`) |
 | `HTF_METRICS_DIR` | Fog | Folder of the evaluation measurements, `{dir}/fog-{id}.csv` (`metrics`, inside `fog/`) |

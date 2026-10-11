@@ -19,5 +19,6 @@ edge_groups = ["4000,4005"]
 # handover_policy = "area"   # baseline for comparison
 # hom_db          = 3
 # ttt_min         = 60
+# coverage        = "off"  # C3 baseline: the area of a failed Fog stays without service
 
 # db_instance_class = "db.t4g.small"   # TMS database (RDS PostgreSQL + PostGIS); default db.t4g.micro

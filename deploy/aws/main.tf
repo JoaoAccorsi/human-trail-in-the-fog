@@ -291,6 +291,7 @@ resource "aws_instance" "fog" {
       HTF_HANDOVER       = var.handover_policy
       HTF_HOM_DB         = var.hom_db
       HTF_TTT_MIN        = var.ttt_min
+      HTF_COVERAGE       = var.coverage
     }
   }))
   user_data_replace_on_change = true

@@ -29,6 +29,8 @@ Options:
                        crashes made with /admin/crash are already in the Fog measurements
     --tms-outages PATH CSV "from_ms,until_ms,kind" of TMS outages (deploy/tms-outage.sh,
                        deploy/aws/tms-outage.sh), scenario C2
+    --ping-interval-ms real time per slot of the run (default $HTF_PING_INTERVAL_MS or 2000), to place
+                       a crash in the dataset day (C3: pings stored before / after the crash)
     --salt S           pseudonym secret, to match the dataset users to the stored trails
                        (default $HTF_SALT or htf-dev-salt)
     --ping-pong-min M  a return to the previous Fog within M minutes counts as ping-pong (default 60)
@@ -195,6 +197,7 @@ def city_metrics(visits, measures, args, crash_times):
     rows.append(("total_visits", len(visits), "count"))
     pings = sum(v["pings"] for v in visits)
     rows.append(("pings_stored", pings, "count"))
+    data = None
     if args.users and args.dataset:
         data = read_dataset(args.dataset, parse_users(args.users), args.day)
         expected = sum(len(r) for r in data.values())
@@ -277,6 +280,31 @@ def city_metrics(visits, measures, args, crash_times):
             detection.append(after[0] - t)
     if detection:
         stats(rows, "failure_detection", detection)
+    # pings of the dataset stored by the TMS before and after the crash (C3): the open visits of the
+    # failed node are lost with its memory; after the crash, its area is covered by the neighbors
+    if data and crashes and by_event["ping"]:
+        t0 = min(m["time_ms"] - m["value_ms"] for m in by_event["ping"])     # first ping of the run
+        first_slot = min(t for pts in data.values() for t, _, _ in pts)
+        crash_slot = first_slot + int((crashes[0][0] - t0) // args.ping_interval_ms)
+        n = {True: [0, 0], False: [0, 0]}                                  # after crash? -> [pings, stored]
+        for uid, pts in data.items():
+            visits = trails.get(pseudonym(uid, args.salt), [])
+            for t, _, _ in pts:
+                k = n[t >= crash_slot]
+                k[0] += 1
+                k[1] += any(v["arrivalT"] <= t <= v["departureT"] for v in visits)
+        rows.append(("crash_slot", crash_slot, f"slot ({crash_slot // 2:02d}:{crash_slot % 2 * 30:02d})"))
+        for after, name in ((False, "before"), (True, "after")):
+            pings, stored = n[after]
+            rows.append((f"pings_{name}_crash", pings, "count"))
+            rows.append((f"slot_coverage_{name}_crash", stored / pings * 100 if pings else None, "% of pings"))
+
+    # coverage of the area of a failed Fog by its closest live neighbor (cell outage compensation)
+    cover = by_event["cover"]
+    rows.append(("coverage_pings", len(cover), "count"))
+    rows.append(("coverage_people", len({m["h"] for m in cover}), "count"))
+    if cover and crashes:
+        rows.append(("coverage_start_after_crash", (min(m["time_ms"] for m in cover) - crashes[0][0]) / 1000, "s"))
     refresh = by_event["owner_refresh"]
     rows.append(("owner_records_restored", sum(int(m["detail"].get("restored", 0)) for m in refresh), "count"))
     if refresh:
@@ -328,6 +356,8 @@ def main():
     ap.add_argument("--ping-pong-min", type=int, default=60)
     ap.add_argument("--tms-outages")
     ap.add_argument("--salt", default=os.environ.get("HTF_SALT", "htf-dev-salt"))
+    ap.add_argument("--ping-interval-ms", type=int, default=int(os.environ.get("HTF_PING_INTERVAL_MS", "2000")),
+                    help="real time per 30-min slot of the run (to place a crash in the dataset day)")
     ap.add_argument("--out", default=os.path.join(ROOT, "results", "metrics.csv"))
     args = ap.parse_args()
 

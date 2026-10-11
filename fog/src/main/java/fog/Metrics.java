@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
  *   owner_refresh owner records republished after a ring change, value = time since the change was
  *                 reported (detail: sent, restored)
  *   crash         simulated crash of this node (/admin/crash)
+ *   cover         a ping served in the area of a Fog that is down (detail: for = the failed Fog)
  *
  * deploy/metrics.py turns these files (and the visits stored by the TMS) into the final CSV.
  * Lines are written by a single background thread, so measuring never delays a user's lane.

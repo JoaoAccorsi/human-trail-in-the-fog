@@ -52,6 +52,7 @@ SINCE=0
 python3 "$ROOT/deploy/metrics.py" --label "$LABEL" --day "$DAY" --since "$SINCE" \
   --visits "$OUT/visits.json" --fog-metrics "$OUT/metrics" \
   --users "$USERS" --dataset "$ROOT/edge/data/users.csv" \
+  --ping-interval-ms "$(terraform output -raw ping_interval_ms)" \
   --crash-times "$ROOT/results/crash-times.csv" --tms-outages "$ROOT/results/tms-outages.csv"
 
 python3 "$ROOT/deploy/validate-epcis.py" --label "$LABEL" --day "$DAY" --documents "$OUT/documents.json" || true

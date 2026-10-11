@@ -98,6 +98,12 @@ variable "ttt_min" {
   default     = 60
 }
 
+variable "coverage" {
+  description = "Coverage of the area of a failed Fog node by its closest live neighbor: on, or off (baseline: the area stays without service)."
+  type        = string
+  default     = "on"
+}
+
 variable "check_vcpu_quota" {
   description = "Stop the plan when the instances need more vCPUs than the account's quota for Running On-Demand Standard instances. Needs servicequotas:GetServiceQuota; set false to skip the check."
   type        = bool
