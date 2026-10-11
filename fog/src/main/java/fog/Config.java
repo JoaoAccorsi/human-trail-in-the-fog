@@ -54,7 +54,7 @@ public final class Config {
     public static final int FAILURE_TIMEOUT_MS = 1500;
     /** A "fog:{id}" record not refreshed for this long is treated as a Fog that is down. */
     public static final int ADDRESS_TTL_MS = 10_000;
-    /** How long a node trusts what it learned about another node being up or down (ring lookup). */
+    /** Period of the background check of whether the neighbor Fog nodes are up (ring lookup). */
     public static final int LIVENESS_CACHE_MS = Integer.parseInt(env("HTF_LIVENESS_CACHE_MS", "3000"));
     /**
      * Coverage of the area of a Fog node that is down (cell outage compensation): its cells are

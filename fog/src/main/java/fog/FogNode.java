@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -102,7 +103,11 @@ final class FogNode {
     private final Map<String, Context> prepared = new ConcurrentHashMap<>();  // received via PREPARE
     private final Map<String, NodeRef> inHandover = new ConcurrentHashMap<>(); // h -> target Fog
     private final Map<Integer, NodeRef> addresses = new ConcurrentHashMap<>(); // cache of "fog:{id}"
-    private final Map<Integer, long[]> liveness = new ConcurrentHashMap<>();   // fog -> {checked at, up 1/0}
+    private final Map<Integer, long[]> liveness = new ConcurrentHashMap<>();   // fog -> {checked at, up 1/0, down since}
+    /** Fog nodes whose liveness this node follows (its neighbors, and any Fog it asked about). */
+    private final Set<Integer> watched = ConcurrentHashMap.newKeySet();
+    /** Liveness checks run here, never on the users' lanes (a ring lookup per ping would delay them). */
+    private final ScheduledExecutorService livenessChecker = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean refreshScheduled = new AtomicBoolean(false);
     /** Lost key ranges waiting for the next targeted refresh (guarded by itself). */
     private final List<ChordNode.Range> lostRanges = new ArrayList<>();
@@ -153,12 +158,17 @@ final class FogNode {
         timers.scheduleWithFixedDelay(chord::checkPredecessor, 600, 500, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(chord::fixFingers, 400, 150, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(this::publishAddress, 500, 3000, TimeUnit.MILLISECONDS);
+        int[] a = Grid.area(id);                       // follow the liveness of the neighbors from the start
+        Radio.candidates(id, (a[0] + a[2]) / 2, (a[1] + a[3]) / 2).forEach(f -> { if (f != id) watched.add(f); });
+        livenessChecker.scheduleWithFixedDelay(() -> safely(() -> watched.forEach(this::checkLiveness)),
+                Config.LIVENESS_CACHE_MS, Config.LIVENESS_CACHE_MS, TimeUnit.MILLISECONDS);
         timers.scheduleWithFixedDelay(() -> background.execute(() -> safely(() -> refreshOwnership(null, null))),
                 Config.OWNER_REFRESH_MS, Config.OWNER_REFRESH_MS, TimeUnit.MILLISECONDS);
         chord.onRingChange(range -> {
             metrics.record("node_down", 0, null,
                     "range=" + ChordNode.show(range.from()) + ".." + ChordNode.show(range.to()));
             scheduleOwnerRefresh(range, "my successor went down");
+            markDown(range.to(), "my successor on the ring stopped answering");
             background.execute(() -> safely(() -> announceRingChange(range)));
         });
 
@@ -219,6 +229,7 @@ final class FogNode {
 
     void stop() {
         timers.shutdownNow();
+        livenessChecker.shutdownNow();
         try {
             if (mqtt != null && mqtt.isConnected()) {
                 mqtt.disconnect();
@@ -295,46 +306,90 @@ final class FogNode {
     // =========================================================== coverage of failed Fog nodes
 
     /**
-     * Is the Fog node up? Its "fog:{id}" record on the ring was refreshed within ADDRESS_TTL_MS.
-     * The answer is kept for LIVENESS_CACHE_MS. When the ring cannot be asked, the node is assumed
-     * up: an area is only taken over when its Fog is known to be down.
+     * Is the Fog node up? Answered from memory, without waiting: a background task checks every
+     * LIVENESS_CACHE_MS, on the ring, whether the "fog:{id}" record of each watched Fog was refreshed
+     * within ADDRESS_TTL_MS. A Fog not watched yet is assumed up and starts being watched: an area
+     * is only taken over when its Fog is known to be down.
      */
     boolean isUp(int fogId) {
         if (fogId == id) {
             return true;
         }
-        long now = System.currentTimeMillis();
         long[] known = liveness.get(fogId);
-        if (known != null && now - known[0] < Config.LIVENESS_CACHE_MS) {
-            return known[1] == 1;
-        }
-        boolean up;
-        try {
-            ChordNode.Value v = chord.get("fog:" + fogId);
-            if (v.value() == null) {
-                up = false;
-            } else {
-                NodeRef r = FogApp.JSON.fromJson(v.value(), NodeRef.class);
-                up = now - r.seenAt <= Config.ADDRESS_TTL_MS;
-                if (up) {
-                    addresses.put(fogId, r);
+        if (known == null) {
+            if (watched.add(fogId)) {
+                try {
+                    livenessChecker.execute(() -> safely(() -> checkLiveness(fogId)));
+                } catch (java.util.concurrent.RejectedExecutionException e) {
+                    // node stopping
                 }
             }
-        } catch (IOException e) {
-            up = true;                                      // unknown: never take over on a doubt
+            return true;
         }
-        boolean wasUp = known == null || known[1] == 1;
-        liveness.put(fogId, new long[] {now, up ? 1 : 0});
+        return known[1] == 1;
+    }
+
+    /**
+     * One liveness check on the ring (background thread). A failed lookup changes nothing, and a
+     * Fog whose address was never seen is not declared down: at startup the nodes come up one by
+     * one, and a neighbor that has not published its address yet is starting, not failed.
+     */
+    private void checkLiveness(int fogId) {
+        long now = System.currentTimeMillis();
+        NodeRef found = null;
+        try {
+            ChordNode.Value v = chord.get("fog:" + fogId);
+            if (v.value() != null) {
+                found = FogApp.JSON.fromJson(v.value(), NodeRef.class);
+            }
+        } catch (IOException e) {
+            return;                                         // unknown: keep what was known
+        }
+        long[] before = liveness.get(fogId);
+        if (found == null && before == null) {
+            return;                                         // never seen: still starting
+        }
+        boolean up = found != null && now - found.seenAt <= Config.ADDRESS_TTL_MS;
+        if (up && before != null && before[1] == 0 && found.seenAt <= before[2]) {
+            up = false;          // reported down on the ring: only an address published after that brings it back
+        }
+        long downSince = up ? 0 : (before != null && before[1] == 0 ? before[2] : now);
+        liveness.put(fogId, new long[] {now, up ? 1 : 0, downSince});
+        boolean wasUp = before == null || before[1] == 1;
         if (!up) {
             addresses.remove(fogId);
             if (wasUp) {
                 log("OIDA: Fog %d is down (address not refreshed on the ring)%s", fogId,
                         Config.COVERAGE ? "; its area is covered by the closest live neighbor" : "");
             }
-        } else if (!wasUp) {
-            log("OIDA: Fog %d is up again", fogId);
+        } else {
+            addresses.putIfAbsent(fogId, found);
+            if (!wasUp) {
+                log("OIDA: Fog %d is up again", fogId);
+            }
         }
-        return up;
+    }
+
+    /**
+     * A node reported down on the ring (by its predecessor, which detects it in under a second,
+     * or by the announcement that the predecessor broadcasts): its Fog is marked down at once, so
+     * the coverage of its area starts now instead of after ADDRESS_TTL_MS. The ring id of each Fog
+     * is hash("fog-N"), so the dead node's id identifies its Fog.
+     */
+    private void markDown(long deadId, String how) {
+        for (int f = 1; f <= Config.numberOfFogs(); f++) {
+            if (f != id && ChordNode.hash("fog-" + f) == deadId) {
+                long now = System.currentTimeMillis();
+                long[] before = liveness.put(f, new long[] {now, 0, now});
+                watched.add(f);
+                addresses.remove(f);
+                if (before == null || before[1] == 1) {
+                    log("OIDA: Fog %d is down (%s)%s", f, how,
+                            Config.COVERAGE ? "; its area is covered by the closest live neighbor" : "");
+                }
+                return;
+            }
+        }
     }
 
     /**
@@ -963,6 +1018,7 @@ final class FogNode {
                 return;                                   // already received (and forwarded)
             }
             scheduleOwnerRefresh(range, "Fog " + b.get("fog").getAsInt() + " reported a node down");
+            markDown(range.to(), "reported by Fog " + b.get("fog").getAsInt() + " over the ring");
             JsonObject payload = new JsonObject();
             payload.add("fog", b.get("fog"));
             payload.add("from", b.get("from"));

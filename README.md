@@ -433,8 +433,11 @@ Cost per failure, for U users and N nodes: about U/N records rewritten (the lost
 all U. With 1,000,000 users and 1,000 nodes: ~1,000 writes, about one per node.
 
 **Coverage of the failed node's area** (cell outage compensation, as in cellular networks). Every node
-learns that a Fog is down when its `fog:{id}` address is no longer refreshed on the ring (10 s). From
-then on, each cell of that area is served by the live neighbor (of the 8 around it) whose area center
+learns that a Fog is down from the same announcement that triggers the owner records refresh (the
+predecessor detects the failure in under a second and broadcasts it), or, as a safety net, when its
+`fog:{id}` address is no longer refreshed on the ring (10 s; checked in the background every 3 s,
+never while a ping is processed). A Fog reported down stays down until it publishes its address
+again. From then on, each cell of that area is served by the live neighbor (of the 8 around it) whose area center
 is closest to the cell; every node applies the same rule, so they agree without talking. The Edges
 of the failed node go back to the entry broker, which redirects them to that neighbor; the neighbor
 accepts users outside its own area only while it covers a failed node, and a Fog that is down is
@@ -443,7 +446,7 @@ never a handover target. When the node comes back, its users return to it by ord
 without service), to compare.
 
 Not recovered in this version: the contexts and open visits in the failed node's memory (the users
-start a new context on the neighbor) and the pings of the ~10 s until the failure is noticed.
+start a new context on the neighbor) and the pings of the few seconds until the failure is noticed.
 Visits already sent to the TMS are safe.
 
 ### Evaluation metrics
