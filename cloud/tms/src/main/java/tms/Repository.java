@@ -193,13 +193,22 @@ class Repository {
         }
     }
 
-    /** EPCIS documents stored for a day (one per visit, as received), for the conformance check. */
-    List<JsonObject> documents(int day) throws IOException {
-        String sql = "SELECT document FROM epcis_events WHERE day = ? ORDER BY fog, arrival_t, h";
+    /**
+     * EPCIS documents stored for a day (one per visit, as received), for the conformance check.
+     * limit != null: a random sample of that size (tens of thousands of documents do not fit in
+     * one response of a small TMS instance).
+     */
+    List<JsonObject> documents(int day, Integer limit) throws IOException {
+        String sql = limit == null
+                ? "SELECT document FROM epcis_events WHERE day = ? ORDER BY fog, arrival_t, h"
+                : "SELECT document FROM epcis_events WHERE day = ? ORDER BY random() LIMIT ?";
         try {
             return db.with(c -> {
                 try (PreparedStatement ps = c.prepareStatement(sql)) {
                     ps.setInt(1, day);
+                    if (limit != null) {
+                        ps.setInt(2, limit);
+                    }
                     List<JsonObject> out = new ArrayList<>();
                     try (ResultSet rs = ps.executeQuery()) {
                         while (rs.next()) {

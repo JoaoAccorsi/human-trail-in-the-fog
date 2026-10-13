@@ -1084,7 +1084,14 @@ final class FogNode {
         try {
             r.run();
         } catch (RuntimeException e) {
-            log("error: %s", e);
+            // the first frames say where it failed (the message alone is often not enough)
+            StringBuilder at = new StringBuilder();
+            StackTraceElement[] st = e.getStackTrace();
+            for (int i = 0; i < Math.min(4, st.length); i++) {
+                at.append(i == 0 ? " at " : " < ").append(st[i].getFileName()).append(':').append(st[i].getLineNumber())
+                        .append(' ').append(st[i].getMethodName());
+            }
+            log("error: %s%s", e, at);
         }
     }
 

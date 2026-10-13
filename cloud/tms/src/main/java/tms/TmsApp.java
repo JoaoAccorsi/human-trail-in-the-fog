@@ -28,7 +28,7 @@ import com.sun.net.httpserver.HttpServer;
  *   GET  /visits?fog=F&day=N   visits recorded by Fog F on day N          -> 200 [ ... ]
  *   GET  /trail/{h}?day=N[&from=HH:MM&to=HH:MM][&toDay=M]    visits of h that overlap the period -> 200 [ ... ]
  *   GET  /fogs?day=N           Fog nodes with visits on day N             -> 200 [{fog, people, visits}]
- *   GET  /documents?day=N      EPCIS documents stored for day N (one per visit) -> 200 [ ... ]
+ *   GET  /documents?day=N[&limit=K]  EPCIS documents stored for day N (one per visit; K = random sample) -> 200 [ ... ]
  *   GET  /stats                captures since the start or the last clean: requests, visits new / repeated / rejected
  *   GET  /health
  *   POST /admin/clean          deletes every visit and EPCIS document (fresh start for a new run)
@@ -202,8 +202,14 @@ public class TmsApp {
             respond(ex, 400, "{\"error\":\"provide the day: /documents?day=20\"}");
             return;
         }
+        Integer limit;
+        try {
+            limit = intParam(ex, "limit");             // optional: random sample of this size
+        } catch (NumberFormatException e) {
+            limit = null;
+        }
         JsonArray arr = new JsonArray();
-        repo.documents(day).forEach(arr::add);
+        repo.documents(day, limit).forEach(arr::add);
         respond(ex, 200, arr.toString());
     }
 

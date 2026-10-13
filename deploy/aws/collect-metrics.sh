@@ -25,7 +25,8 @@ OUT="$ROOT/results/aws/$LABEL"
 
 wait_for() {   # waits until every instance of an SSM command finished
   local id="$1" status
-  for _ in $(seq 1 100); do
+  # up to WAIT_S seconds (default 30 min): with 25,000 users the TMS export + query benchmark take minutes
+  for _ in $(seq 1 $(( ${WAIT_S:-1800} / 3 ))); do
     status="$(aws ssm list-command-invocations --region "$REGION" --command-id "$id" \
       --query 'CommandInvocations[].Status' --output text)"
     case "$status" in
@@ -39,7 +40,7 @@ wait_for() {   # waits until every instance of an SSM command finished
 echo "Copying the measurements of the Fog nodes and the visits of the TMS to $DEST ..."
 FOGS="$(./ssm.sh tag:Role fog "aws s3 cp /opt/htf/metrics/ $DEST/metrics/\$(hostname)/ --recursive --region $REGION")"
 BENCH="$(base64 < "$ROOT/deploy/bench-queries.py" | tr -d '\n')"
-TMS="$(./ssm.sh tag:Role tms "curl -fsS -o /tmp/visits.json 'http://localhost:8080/visits?day=$DAY' && aws s3 cp /tmp/visits.json $DEST/visits.json --region $REGION && curl -fsS -o /tmp/documents.json 'http://localhost:8080/documents?day=$DAY' && aws s3 cp /tmp/documents.json $DEST/documents.json --region $REGION && echo $BENCH | base64 -d > /tmp/bench-queries.py && python3 /tmp/bench-queries.py --tms http://localhost:8080 --day $DAY --rows-out /tmp/queries.json && aws s3 cp /tmp/queries.json $DEST/queries.json --region $REGION")"
+TMS="$(./ssm.sh tag:Role tms "curl -fsS -o /tmp/visits.json 'http://localhost:8080/visits?day=$DAY' && aws s3 cp /tmp/visits.json $DEST/visits.json --region $REGION && { curl -fsS -o /tmp/documents.json 'http://localhost:8080/documents?day=$DAY&limit=${DOCS_SAMPLE:-5000}' && aws s3 cp /tmp/documents.json $DEST/documents.json --region $REGION; } ; echo $BENCH | base64 -d > /tmp/bench-queries.py && python3 /tmp/bench-queries.py --tms http://localhost:8080 --day $DAY --rows-out /tmp/queries.json && aws s3 cp /tmp/queries.json $DEST/queries.json --region $REGION")"
 wait_for "$FOGS"
 wait_for "$TMS"
 
