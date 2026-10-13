@@ -109,6 +109,12 @@ final class ChordNode {
     private volatile boolean predecessorLost;
     /** Told about every put, claim and get that succeeded (not about the ring maintenance). */
     private volatile LookupObserver lookups = (op, key, hops, ms) -> { };
+    /** Seed this node joined through (null on the seed itself), used to repair a partitioned ring. */
+    private volatile String seedUrl;
+    private int roundsSincePartitionCheck = 0;
+    private int partitionStrikes = 0;
+    /** Stabilize rounds between partition checks (with stabilize every 500 ms: every 5 s). */
+    static final int PARTITION_CHECK_ROUNDS = 10;
 
     ChordNode(NodeRef self, Consumer<String> log) {
         this.self = self;
@@ -180,6 +186,38 @@ final class ChordNode {
         for (int i = 0; i < M; i++) {
             fingers[i] = succ;
         }
+        this.seedUrl = seedUrl;
+    }
+
+    /**
+     * Partition repair. If the node it joined through dies while the node is joining (e.g. the
+     * instances are being replaced one by one), a node can end up alone, or in a small ring of its
+     * own, and Chord's stabilize never merges two rings. Every PARTITION_CHECK_ROUNDS rounds a node
+     * that joined through a seed looks up the seed's id on its own ring: if the lookup does not
+     * reach the seed twice in a row, the seed is on another ring, and the node joins again through it.
+     */
+    private void checkPartition() {
+        String url = seedUrl;
+        if (url == null || ++roundsSincePartitionCheck < PARTITION_CHECK_ROUNDS) {
+            return;
+        }
+        roundsSincePartitionCheck = 0;
+        try {
+            NodeRef seed = FogApp.JSON.fromJson(
+                    FogCommunication.get(url + "/chord/info", TIMEOUT).getAsJsonObject().get("self"), NodeRef.class);
+            if (seed == null || seed.equals(self) || findSuccessor(seed.id).node().equals(seed)) {
+                partitionStrikes = 0;
+                return;
+            }
+            if (++partitionStrikes < 2) {
+                return;
+            }
+            partitionStrikes = 0;
+            log.accept("Chord: the seed node is not on my ring (partitioned) -> joining again through it");
+            join(url);
+        } catch (IOException | RuntimeException e) {
+            // seed or lookup unreachable: nothing to repair now, try again later
+        }
     }
 
     /**
@@ -188,6 +226,7 @@ final class ChordNode {
      * If the successor is down, the next one in the list takes its place.
      */
     void stabilize() {
+        checkPartition();
         NodeRef succ = successor();
         if (succ.equals(self)) {                 // alone on the ring (or bootstrapping)
             NodeRef p = predecessor;
