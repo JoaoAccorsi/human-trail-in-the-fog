@@ -36,7 +36,8 @@ import com.google.gson.Gson;
  *
  * 1. Reads the records of the users (HTF_USERS, or HTF_USER) on Config.DAY from YJMob100K.
  * 2. Replaces each uid with the pseudonym h(s, e) = HMAC-SHA256(salt, uid).
- * 3. Each user is a separate simulated phone: it connects to the entry broker (Fog 1) and
+ * 3. Each user is a separate simulated phone: it connects to an entry broker (Fog 1, or with
+ *    HTF_ENTRY_BROKERS one of several, chosen by uid) and
  *    subscribes to htf/edge/{h}/control. The phones of this process share one MQTT connection
  *    per Fog broker (see Brokers); each phone publishes on the broker of the Fog serving it.
  * 4. The day is replayed on a shared clock: for every timeslot that has records, the pings of
@@ -59,7 +60,8 @@ import com.google.gson.Gson;
 public class EdgeApp {
 
     private static final Gson JSON = new Gson();
-    private static final String ENTRY = "entry (Fog " + Config.ENTRY_FOG + ")";
+    /** currentFog of a phone still on its entry broker (not yet sent to the Fog serving it). */
+    private static final String ENTRY = "entry";
 
     /** Handover command received from the Fog: {"type":"handover","fog":8,"broker":"tcp://localhost:1908"}. */
     static class Command {
@@ -81,7 +83,13 @@ public class EdgeApp {
     static final class Brokers {
         private final Map<String, MqttClient> clients = new HashMap<>();
         private final Map<String, Device> byPseudonym;
-        private final String clientPrefix = "htf-edge-" + ProcessHandle.current().pid() + "-";
+        /**
+         * Client ids must be unique per broker. The PID alone is not: in a container the Java
+         * process is always PID 1, so every Edge used the same id on the same broker and each new
+         * connection took over (closed) the other Edge's one, over and over. A random part fixes it.
+         */
+        private final String clientPrefix = "htf-edge-"
+                + java.util.UUID.randomUUID().toString().substring(0, 8) + "-";
 
         Brokers(Map<String, Device> byPseudonym) {
             this.byPseudonym = byPseudonym;
@@ -127,6 +135,8 @@ public class EdgeApp {
             options.setConnectionTimeout(10);
             options.setMaxInflight(1000);                 // many phones publish at once on one connection
             c.connect(options);
+            // never wait forever for a broker: a stuck publish fails, and the phone falls back
+            c.setTimeToWait(10_000);
             clients.put(broker, c);
             return c;
         }
@@ -147,6 +157,8 @@ public class EdgeApp {
     static final class Device {
         final int uid;
         final String h;
+        /** Index of this phone's entry broker in Config.ENTRY_BROKERS (uid mod n). */
+        final int entryIndex;
         final List<Ping> pings = new ArrayList<>();
         volatile Command pending;
         String broker;                                   // broker of the Fog serving this phone
@@ -157,6 +169,11 @@ public class EdgeApp {
         Device(int uid, String h) {
             this.uid = uid;
             this.h = h;
+            this.entryIndex = Math.floorMod(uid, Config.ENTRY_BROKERS.size());
+        }
+
+        String entry() {
+            return Config.ENTRY_BROKERS.get(entryIndex);
         }
 
         String controlTopic() {
@@ -225,18 +242,22 @@ public class EdgeApp {
                 return;
             } catch (MqttException e) {
                 System.out.printf("[Edge] user %d: broker of %s did not answer (reason %d); back to the entry broker %s%n",
-                        uid, currentFog, e.getReasonCode(), Config.ENTRY_BROKER);
+                        uid, currentFog, e.getReasonCode(), entry());
             }
             pending = null;
-            for (int attempt = 1; ; attempt++) {
+            // its own entry broker first; with several entries, the next ones if it is down too
+            int n = Config.ENTRY_BROKERS.size();
+            for (int attempt = 0; ; attempt++) {
                 try {
-                    attach(Config.ENTRY_BROKER);
+                    attach(Config.ENTRY_BROKERS.get((entryIndex + attempt) % n));
                     break;
                 } catch (MqttException e) {
-                    if (attempt >= 30) {
+                    if (attempt + 1 >= Math.max(30, n)) {
                         throw e;
                     }
-                    Thread.sleep(1000);
+                    if ((attempt + 1) % n == 0) {
+                        Thread.sleep(1000);
+                    }
                 }
             }
             currentFog = ENTRY;
@@ -358,23 +379,25 @@ public class EdgeApp {
         }
     }
 
-    /** Connects every phone to the entry broker, retrying up to CONNECT_RETRY_S. */
+    /** Connects every phone to its entry broker, retrying up to CONNECT_RETRY_S. */
     private static void connectAll(ExecutorService pool, Iterable<Device> devices) throws InterruptedException {
         long deadline = System.currentTimeMillis() + Config.CONNECT_RETRY_S * 1000L;
-        while (true) {
-            try {
-                brokers.client(Config.ENTRY_BROKER);
-                break;
-            } catch (MqttException e) {
-                if (System.currentTimeMillis() < deadline) {
-                    System.out.printf("[Edge] broker %s not available yet, retrying...%n", Config.ENTRY_BROKER);
-                    Thread.sleep(5000);
-                    continue;
+        for (String entry : Config.ENTRY_BROKERS) {
+            while (true) {
+                try {
+                    brokers.client(entry);
+                    break;
+                } catch (MqttException e) {
+                    if (System.currentTimeMillis() < deadline) {
+                        System.out.printf("[Edge] broker %s not available yet, retrying...%n", entry);
+                        Thread.sleep(5000);
+                        continue;
+                    }
+                    System.out.printf("[Edge] could not connect to broker %s (%d).%n"
+                            + "       Is the Fog running? Use: cd fog && mvn -q compile exec:exec%n",
+                            entry, e.getReasonCode());
+                    System.exit(1);
                 }
-                System.out.printf("[Edge] could not connect to broker %s (%d).%n"
-                        + "       Is the Fog running? Use: cd fog && mvn -q compile exec:exec%n",
-                        Config.ENTRY_BROKER, e.getReasonCode());
-                System.exit(1);
             }
         }
         AtomicInteger connected = new AtomicInteger();
@@ -382,17 +405,19 @@ public class EdgeApp {
         for (Device d : devices) {
             tasks.add(() -> {
                 try {
-                    d.attach(Config.ENTRY_BROKER);
+                    d.attach(d.entry());
                     connected.incrementAndGet();
                 } catch (MqttException e) {
                     d.failed = true;
-                    System.out.printf("[Edge] user %d: could not subscribe on %s (%d)%n", d.uid, Config.ENTRY_BROKER, e.getReasonCode());
+                    System.out.printf("[Edge] user %d: could not subscribe on %s (%d)%n", d.uid, d.entry(), e.getReasonCode());
                 }
                 return null;
             });
         }
         pool.invokeAll(tasks);
-        System.out.printf("[Edge] %d phone(s) connected to entry broker %s%n", connected.get(), Config.ENTRY_BROKER);
+        System.out.printf("[Edge] %d phone(s) connected to entry broker %s%n", connected.get(),
+                Config.ENTRY_BROKERS.size() == 1 ? Config.ENTRY_BROKERS.get(0)
+                        : "(" + Config.ENTRY_BROKERS.size() + " entries, one per Fog)");
     }
 
     private static String describe(List<Integer> uids) {

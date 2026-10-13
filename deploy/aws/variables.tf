@@ -104,6 +104,24 @@ variable "coverage" {
   default     = "on"
 }
 
+variable "fog_lanes" {
+  description = "Logic lanes (single-thread executors) per Fog node. Redirecting a phone from the entry node waits on the network (ring lookup + relay), so more lanes give the entry node more throughput when thousands of phones start on it at once."
+  type        = number
+  default     = 8
+}
+
+variable "fog_mqtt_qos" {
+  description = "QoS (0 or 1) of each Fog's subscription to the pings and of its commands to the Edges. 1 in scenarios C1-C3; 0 in the scale runs, where Moquette 0.17 failed handling the PUBACKs of thousands of phones on the entry node."
+  type        = number
+  default     = 1
+}
+
+variable "distributed_entry" {
+  description = "true: each phone starts on the broker of Fog (uid mod N) instead of all on Fog 1, spreading the initial redirects over every Fog (scale runs). false: single entry node Fog 1, as in scenarios C1-C3."
+  type        = bool
+  default     = false
+}
+
 variable "check_vcpu_quota" {
   description = "Stop the plan when the instances need more vCPUs than the account's quota for Running On-Demand Standard instances. Needs servicequotas:GetServiceQuota; set false to skip the check."
   type        = bool

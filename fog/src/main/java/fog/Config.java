@@ -38,7 +38,17 @@ public final class Config {
     public static final String PINGS_TOPIC = "htf/pings";
     /** Topic where the Fog sends commands to the Edge (e.g. switch broker). */
     public static final String CONTROL_TOPIC = "htf/edge/%s/control";
-    public static final int QOS = 1;
+    /**
+     * QoS of the Fog's subscription to the pings and of its commands to the Edge (1 by default).
+     * 0 avoids the broker waiting for PUBACKs from the Fog and the phones: under thousands of phones
+     * on the entry node, Moquette 0.17 failed in that path (IllegalReferenceCountException in
+     * pubAckReceived) and its session loop stopped. A lost command is sent again at the next ping.
+     */
+    public static final int QOS = Integer.parseInt(env("HTF_MQTT_QOS", "1"));
+    /** QoS 1 messages the Fog's MQTT client may have in flight (Paho's default, 10, is too small for the entry node). */
+    public static final int MQTT_MAX_INFLIGHT = Integer.parseInt(env("HTF_MQTT_MAX_INFLIGHT", "10000"));
+    /** Size of each command queue of the embedded broker's session loops (Moquette's default is 1024). */
+    public static final String BROKER_QUEUE_SIZE = env("HTF_BROKER_QUEUE_SIZE", "65536");
 
     // ------------------------------------------------------------------ Chord
     /**

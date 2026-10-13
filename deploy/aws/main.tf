@@ -292,6 +292,8 @@ resource "aws_instance" "fog" {
       HTF_HOM_DB         = var.hom_db
       HTF_TTT_MIN        = var.ttt_min
       HTF_COVERAGE       = var.coverage
+      HTF_FOG_LANES      = var.fog_lanes
+      HTF_MQTT_QOS       = var.fog_mqtt_qos
     }
   }))
   user_data_replace_on_change = true
@@ -383,6 +385,9 @@ resource "aws_instance" "edge" {
       HTF_USERS            = each.value.users
       HTF_DAY              = var.day
       HTF_ENTRY_BROKER     = "tcp://${local.fog_ip["1"]}:1901"
+      # distributed entry: every Fog's broker is an entry point (phone uid mod N); empty = only Fog 1
+      HTF_ENTRY_BROKERS = var.distributed_entry ? join(",", [for n in range(1, var.number_of_fogs + 1) :
+      "tcp://${local.fog_ip[tostring(n)]}:${1900 + n}"]) : ""
       HTF_PING_INTERVAL_MS = var.ping_interval_ms
       HTF_START_DELAY_S    = local.edge_start_delay_s
       HTF_CONNECT_RETRY_S  = 900

@@ -200,6 +200,9 @@ final class FogNode {
         });
         MqttConnectOptions options = new MqttConnectOptions();
         options.setCleanSession(true);
+        // Paho allows only 10 QoS 1 publishes in flight by default: when thousands of phones start
+        // on the entry node, its redirect commands failed with "Too many publishes in progress".
+        options.setMaxInflight(Config.MQTT_MAX_INFLIGHT);
         mqtt.connect(options);
         mqtt.subscribe(new String[] {Config.PINGS_TOPIC}, new int[] {Config.QOS});
         log("up | area x=%s y=%s | broker %s | API %s | Chord ring id=%s",

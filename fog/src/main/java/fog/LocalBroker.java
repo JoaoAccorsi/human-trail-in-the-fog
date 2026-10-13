@@ -32,6 +32,9 @@ final class LocalBroker {
         p.setProperty("data_path", "target/moquette/broker-" + port);
         p.setProperty("telemetry_enabled", "false");
         p.setProperty("buffer_flush_millis", "0");   // deliver messages immediately
+        // Commands of the sessions are queued per event loop; with thousands of phones on the entry
+        // node the default queue (1024) filled up ("Session command queue is full") and the broker stalled.
+        p.setProperty("session_queue_size", Config.BROKER_QUEUE_SIZE);
         b.server.startServer(new MemoryConfig(p));
         return b;
     }

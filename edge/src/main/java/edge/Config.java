@@ -26,6 +26,13 @@ public final class Config {
     public static final int ENTRY_FOG = 1;
     /** Embedded MQTT broker of the entry Fog (Fog N listens on 1900 + N). */
     public static final String ENTRY_BROKER = env("HTF_ENTRY_BROKER", "tcp://localhost:" + (1900 + ENTRY_FOG));
+    /**
+     * Distributed entry (optional): comma-separated brokers that act as entry points, e.g. the broker
+     * of every Fog. Each phone uses entry number uid mod n, so no single Fog redirects every phone of
+     * the city at start-up. Every Fog already redirects a phone outside its area to the right Fog.
+     * Empty = only ENTRY_BROKER (Fog 1), as in scenarios C1-C3.
+     */
+    public static final java.util.List<String> ENTRY_BROKERS = entryBrokers();
     /** Seconds to wait before starting (lets the Fog nodes form the Chord ring when everything boots together). */
     public static final int START_DELAY_S = Integer.parseInt(env("HTF_START_DELAY_S", "0"));
     /** Seconds to keep retrying the entry broker before giving up (0 = fail at once). */
@@ -44,6 +51,16 @@ public final class Config {
     private static String env(String name, String fallback) {
         String v = System.getenv(name);
         return v == null || v.isBlank() ? fallback : v;
+    }
+
+    private static java.util.List<String> entryBrokers() {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (String b : env("HTF_ENTRY_BROKERS", "").split(",")) {
+            if (!b.isBlank()) {
+                out.add(b.trim());
+            }
+        }
+        return out.isEmpty() ? java.util.List.of(ENTRY_BROKER) : java.util.List.copyOf(out);
     }
 
     /** Users to simulate: HTF_USERS (list and ranges) or just HTF_USER. */
