@@ -3,7 +3,7 @@
     streamlit run mobility_platform.py
 
 Three kinds of query (the data always comes from the TMS, which reads cloud/tms/data/visits.jsonl):
-  - User trail: the authorized user provides the uid and the period (day and time range); the
+  - User trail: the authorized user provides the uid and the day; the
     pseudonym h(s, e) is computed here, on the client, and only then is the TMS queried (the
     cloud never receives the uid).
   - People at a Fog node: who passed through Fog F on day D and the trail of each one.
@@ -13,8 +13,6 @@ Three kinds of query (the data always comes from the TMS, which reads cloud/tms/
 In the last two, the charts show a random sample of the people (the metrics count everyone),
 so the maps stay readable with hundreds of trails.
 """
-
-from datetime import time
 
 import pandas as pd
 import requests
@@ -51,10 +49,6 @@ with st.sidebar:
     if mode == USER_TRAIL:
         user = st.number_input("User (uid)", min_value=0, value=config.DEFAULT_USER, step=1)
         salt = st.text_input("Salt (pseudonym secret)", value=config.SALT, type="password")
-        slots = [time(h, m) for h in range(24) for m in (0, 30)]
-        t_from, t_to = st.select_slider("Period", options=slots, value=(time(0, 0), time(23, 30)),
-                                        format_func=lambda t: t.strftime("%H:%M"))
-        start, end = t_from.strftime("%H:%M"), t_to.strftime("%H:%M")
     elif mode == PEOPLE_AT_FOG:
         try:
             fogs_of_day = tr.list_fogs(int(day), url)
@@ -86,12 +80,12 @@ if mode == USER_TRAIL:
     st.write("Queried pseudonym:")
     st.code(h, language=None)
     try:
-        trail = tr.fetch_trail(h, int(day), url, start, end)
+        trail = tr.fetch_trail(h, int(day), url)
     except requests.RequestException as e:
         tms_error(url, e)
     if not trail:
-        st.warning("No visits found. Run the Edge and the Fog for this user and day, "
-                   "or widen the period (or check that the salt is the same as the Edge's).")
+        st.warning("No visits found. Run the Edge and the Fog for this user and day "
+                   "(or check that the salt is the same as the Edge's).")
         st.stop()
     if len({tr.side_of(v) for v in trail}) > 1:
         st.warning(MIXED_VERSIONS_WARNING)
@@ -105,7 +99,7 @@ if mode == USER_TRAIL:
 
     left, right = st.columns([1, 1])
     with left:
-        st.pyplot(tr.trail_map(trail, f"Trail of user {user} on day {day}, {start}–{end}"))
+        st.pyplot(tr.trail_map(trail, f"Trail of user {user} on day {day}"))
     with right:
         st.pyplot(tr.timeline(trail))
         st.subheader("Visits to Fog nodes")
@@ -113,7 +107,7 @@ if mode == USER_TRAIL:
 
     with st.expander("GS1 EPCIS events received by the TMS"):
         try:
-            events = tr.fetch_events(h, int(day), url, start, end)
+            events = tr.fetch_events(h, int(day), url)
         except requests.RequestException as e:
             events = []
             st.caption(f"Could not load the events: {e}")

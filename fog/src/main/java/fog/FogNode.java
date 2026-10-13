@@ -106,6 +106,9 @@ final class FogNode {
     private final Map<Integer, long[]> liveness = new ConcurrentHashMap<>();   // fog -> {checked at, up 1/0, down since}
     /** Fog nodes whose liveness this node follows (its neighbors, and any Fog it asked about). */
     private final Set<Integer> watched = ConcurrentHashMap.newKeySet();
+    /** Consecutive checks that found a Fog's address stale (it is declared down at STALE_CHECKS_TO_DOWN). */
+    private final Map<Integer, Integer> staleChecks = new ConcurrentHashMap<>();
+    private static final int STALE_CHECKS_TO_DOWN = 2;
     /** Liveness checks run here, never on the users' lanes (a ring lookup per ping would delay them). */
     private final ScheduledExecutorService livenessChecker = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean refreshScheduled = new AtomicBoolean(false);
@@ -353,6 +356,15 @@ final class FogNode {
         if (up && before != null && before[1] == 0 && found.seenAt <= before[2]) {
             up = false;          // reported down on the ring: only an address published after that brings it back
         }
+        // A stale address seen once may be a lookup that reached an outdated copy, or a few missed
+        // refreshes while the ring is busy: it takes two checks in a row to declare a live Fog down.
+        // (A crash is reported at once by the ring announcement, see markDown.)
+        if (!up && (before == null || before[1] == 1)) {
+            if (staleChecks.merge(fogId, 1, Integer::sum) < STALE_CHECKS_TO_DOWN) {
+                return;
+            }
+        }
+        staleChecks.remove(fogId);
         long downSince = up ? 0 : (before != null && before[1] == 0 ? before[2] : now);
         liveness.put(fogId, new long[] {now, up ? 1 : 0, downSince});
         boolean wasUp = before == null || before[1] == 1;
