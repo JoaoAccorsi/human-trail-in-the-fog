@@ -14,6 +14,8 @@ In the last two, the charts show a random sample of the people (the metrics coun
 so the maps stay readable with hundreds of trails.
 """
 
+import hmac
+
 import pandas as pd
 import requests
 import streamlit as st
@@ -22,6 +24,28 @@ import config
 import trail as tr
 
 st.set_page_config(page_title="HTF - Cloud Mobility Platform", layout="wide")
+
+
+def require_login():
+    """Login screen: nothing below runs until the user signs in (config.CMP_USER / CMP_PASSWORD)."""
+    if st.session_state.get("authenticated"):
+        return
+    st.title("HTF · Cloud Mobility Platform")
+    with st.form("login"):
+        user = st.text_input("User")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+    if submitted:
+        ok_user = hmac.compare_digest(user.encode(), config.CMP_USER.encode())
+        ok_password = hmac.compare_digest(password.encode(), config.CMP_PASSWORD.encode())
+        if ok_user and ok_password:
+            st.session_state["authenticated"] = True
+            st.rerun()
+        st.error("Invalid user or password.")
+    st.stop()
+
+
+require_login()
 st.title("HTF · Cloud Mobility Platform")
 st.caption("Rebuilds the digital trail from the visits sent by the Fog nodes to the TMS")
 
@@ -41,6 +65,9 @@ def tms_error(url: str, e: Exception):
 
 
 with st.sidebar:
+    if st.button("Sign out"):
+        st.session_state.clear()
+        st.rerun()
     st.header("Query")
     mode = st.radio("Query type", [USER_TRAIL, PEOPLE_AT_FOG, CITY])
     day = st.number_input("Day", min_value=0, max_value=74, value=config.DEFAULT_DAY, step=1)

@@ -5,7 +5,7 @@ variable "region" {
 }
 
 variable "allowed_cidr" {
-  description = "Your public IP in CIDR form (e.g. 203.0.113.10/32): the only address allowed to open the Cloud Mobility Platform."
+  description = "Who may open the Cloud Mobility Platform: your public IP in CIDR form (e.g. 203.0.113.10/32), or 0.0.0.0/0 for anyone (the platform asks for a user and password)."
   type        = string
 }
 

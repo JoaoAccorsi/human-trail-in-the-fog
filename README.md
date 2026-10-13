@@ -568,6 +568,7 @@ reads its settings from `HTF_*` environment variables (the defaults are the loca
 | `HTF_ENTRY_BROKER`, `HTF_PING_INTERVAL_MS` | Edge | Entry broker (`tcp://localhost:1901`), real time between pings (1000 ms) |
 | `HTF_START_DELAY_S`, `HTF_CONNECT_RETRY_S` | Edge | Wait before starting (0 s), keep retrying the broker for (0 s) |
 | `HTF_SALT` | Edge, platform | Pseudonym secret (`htf-dev-salt`) |
+| `HTF_CMP_USER`, `HTF_CMP_PASSWORD` | Platform | Login of the Cloud Mobility Platform (`htf` / `htf`) |
 
 ---
 

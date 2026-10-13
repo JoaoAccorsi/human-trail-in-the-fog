@@ -13,7 +13,7 @@ database is an Amazon RDS for PostgreSQL instance with PostGIS.
 | Fog node N (MQTT broker + Chord + handover) | EC2 `t4g.small` `htf-fog-N`, private IP `10.20.1.N` (from N = 256 on: `10.20.2.x`, ...); store-and-forward queue in `/opt/htf/queue` on the instance |
 | Trail Management Service | EC2 `t4g.small` `htf-tms`, `10.20.0.5` |
 | TMS database | RDS for PostgreSQL 16 `db.t4g.micro` `htf-tms` (PostGIS; the TMS creates the tables), in the same zone, not public: only the HTF nodes reach port 5432 |
-| Cloud Mobility Platform | EC2 `t4g.small` `htf-cmp`, `10.20.0.6`, the only port open to the internet (8501, your IP only) |
+| Cloud Mobility Platform | EC2 `t4g.small` `htf-cmp`, `10.20.0.6`, the only port open to the internet (8501, from `allowed_cidr`; login `htf` / `htf`) |
 | Edge simulator (one per group of users) | EC2 `t4g.small` `htf-edge-1`, `htf-edge-2`, ... at `10.20.0.(9+i)`; tag `Users` lists its users |
 | Images / logs / access / results | ECR, CloudWatch Logs group `/htf`, Systems Manager (SSM), S3 bucket `htf-results-<account>-<region>` (measurements of each run) |
 
@@ -51,7 +51,7 @@ if it does not fit, says how many vCPUs are needed; ask for an increase in the c
 
 ```bash
 cp deploy/aws/terraform.tfvars.example deploy/aws/terraform.tfvars
-# edit allowed_cidr: your public IP (curl https://checkip.amazonaws.com) + /32
+# edit allowed_cidr: your public IP (curl https://checkip.amazonaws.com) + /32, or 0.0.0.0/0 for anyone (login required)
 deploy/aws/up.sh
 ```
 
