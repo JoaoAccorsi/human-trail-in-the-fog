@@ -3,8 +3,6 @@
 Rebuilds a person's digital trail across the Fog nodes of a smart city, with stateful handover
 between Fog nodes, GS1 EPCIS 2.0 events and a decentralized directory (Chord ring) of pseudonyms.
 
-Undergraduate thesis (TCC) — Computer Science, UNISINOS (2026) · João Vítor Accorsi · Advisor: Dr. Rodrigo da Rosa Righi
-
 ![HTF architecture](docs/img/architecture.png)
 <sub>A single tier of peer Fog nodes on a Chord ring. Orange: control plane (handover). Blue: data plane
 (EPCIS and queries). Grey: MQTT Edge → Fog. C1–C3: contributions.</sub>
