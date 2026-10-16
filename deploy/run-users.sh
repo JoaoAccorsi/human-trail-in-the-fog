@@ -108,7 +108,7 @@ echo
 echo "Metrics of the run:"
 DATASET="$ROOT/YJMob100K/yjmob100k-dataset2.csv"
 [ -f "$DATASET" ] || DATASET="$DATASET.gz"
-EXTRA=()                                    # an array keeps paths with spaces (e.g. iCloud Drive) whole
+EXTRA=()                                    # an array keeps paths with spaces whole
 [ -f "$DATASET" ] && EXTRA=(--dataset "$DATASET")
 RUN_LABEL="${LABEL:-users-$USERS-day$DAY}"
 python3 "$ROOT/deploy/metrics.py" --label "$RUN_LABEL" --day "$DAY" --since "$START_MS" \

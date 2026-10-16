@@ -175,7 +175,7 @@ Local: `docker compose up -d postgres`. AWS: Amazon RDS.
 
 ### Prerequisites
 
-JDK 21, Maven, Python 3.11+ and Docker Desktop. Create the platform environment outside iCloud:
+JDK 21, Maven, Python 3.11+ and Docker Desktop. Create the platform environment:
 
 ```bash
 python3 -m venv ~/.venvs/htf && source ~/.venvs/htf/bin/activate
