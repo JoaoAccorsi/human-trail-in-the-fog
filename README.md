@@ -3,6 +3,9 @@
 Rebuilds a person's digital trail across the Fog nodes of a smart city, with stateful handover
 between Fog nodes, GS1 EPCIS 2.0 events and a decentralized directory (Chord ring) of pseudonyms.
 
+**Live demo:** the Cloud Mobility Platform runs at <http://3.137.168.201:8501> (user `htf`,
+password `htf`). For now it only holds data of **day 20** of the dataset: choose day 20 in the queries.
+
 ![HTF architecture](docs/img/architecture.png)
 <sub>A single tier of peer Fog nodes on a Chord ring. Orange: control plane (handover). Blue: data plane
 (EPCIS and queries). Grey: MQTT Edge → Fog. C1–C3: contributions.</sub>
